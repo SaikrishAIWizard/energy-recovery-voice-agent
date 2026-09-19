@@ -1,0 +1,195 @@
+{
+  "journey_id": "ENERGY_DROPOUT_RECOVERY",
+  "vertical": "ENERGY",
+  "version": "1.0.0",
+  "description": "Energy dropped-lead recovery journey. One script section per journey step, one approved prompt per field. The state machine may ONLY speak the `prompt` for the active step, or its `fallback_prompt` as a single clarification. `demo_replies` are console quick-replies for the simulated-customer mode and are never spoken by the agent.",
+  "conventions": {
+    "max_retries": "Total capture attempts allowed for the field (initial ask + clarifications).",
+    "max_clarifications": "Hard cap on clarification questions. The spec allows exactly one.",
+    "min_confidence": 0.8
+  },
+  "resume_order": [
+    "recording_consent",
+    "customer_continue",
+    "property_address",
+    "move_in_date",
+    "energy_requirement",
+    "concession_status",
+    "life_support",
+    "contact_preference",
+    "confirmation"
+  ],
+  "data_fields": [
+    "property_address",
+    "move_in_date",
+    "energy_requirement",
+    "concession_status",
+    "life_support",
+    "contact_preference"
+  ],
+  "required_fields": [
+    "property_address",
+    "move_in_date",
+    "energy_requirement",
+    "concession_status",
+    "life_support",
+    "contact_preference"
+  ],
+  "steps": [
+    {
+      "step_id": "recording_consent",
+      "field_name": "recording_consent",
+      "kind": "DISCLOSURE",
+      "prompt": "Hi {first_name}, this is the Energy Recovery Assistant. This call is recorded. You started comparing energy plans with us earlier. May I help you continue?",
+      "fallback_prompt": "Sorry, I didn't catch that. Would you like me to continue helping with your energy comparison?",
+      "validation_type": "consent",
+      "required": false,
+      "max_retries": 2,
+      "max_clarifications": 1,
+      "next_step": "customer_continue",
+      "demo_replies": [
+        "Yes, go ahead.",
+        "I'm a bit busy right now.",
+        "Not interested, thanks.",
+        "Can you put me through to a person?"
+      ]
+    },
+    {
+      "step_id": "customer_continue",
+      "field_name": "continue_intent",
+      "kind": "GATE",
+      "prompt": "Would you like to pick up where you left off?",
+      "fallback_prompt": "Sorry, I didn't catch that. Would you like to continue with your energy comparison?",
+      "validation_type": "continue_intent",
+      "required": false,
+      "max_retries": 2,
+      "max_clarifications": 1,
+      "next_step": "property_address",
+      "demo_replies": [
+        "Yes, let's continue.",
+        "I'm busy, can you call back later?",
+        "Please take me off your list.",
+        "I want to talk to a human."
+      ]
+    },
+    {
+      "step_id": "property_address",
+      "field_name": "property_address",
+      "kind": "FIELD",
+      "prompt": "Great. What is the service address for the property you're connecting?",
+      "fallback_prompt": "Sorry, I missed that. Could you say the full service address again, including the street number and suburb?",
+      "validation_type": "address",
+      "required": true,
+      "max_retries": 2,
+      "max_clarifications": 1,
+      "next_step": "move_in_date",
+      "demo_replies": [
+        "12 Test Street, Sydney NSW 2000",
+        "Unit 4, 88 Sample Road, Parramatta NSW 2150"
+      ]
+    },
+    {
+      "step_id": "move_in_date",
+      "field_name": "move_in_date",
+      "kind": "FIELD",
+      "prompt": "What date are you moving into the property?",
+      "fallback_prompt": "Could you please say the move-in date again, including day, month, and year?",
+      "validation_type": "date",
+      "required": true,
+      "max_retries": 2,
+      "max_clarifications": 1,
+      "next_step": "energy_requirement",
+      "demo_replies": [
+        "1 October 2026",
+        "Next Friday",
+        "2026-10-01",
+        "Sometime in October"
+      ]
+    },
+    {
+      "step_id": "energy_requirement",
+      "field_name": "energy_requirement",
+      "kind": "FIELD",
+      "prompt": "Will you need electricity, gas, or both at the property?",
+      "fallback_prompt": "Sorry, just to be sure — is that electricity, gas, or both?",
+      "validation_type": "energy_requirement",
+      "required": true,
+      "max_retries": 2,
+      "max_clarifications": 1,
+      "next_step": "concession_status",
+      "demo_replies": [
+        "Electricity only.",
+        "Both electricity and gas.",
+        "Just gas please."
+      ]
+    },
+    {
+      "step_id": "concession_status",
+      "field_name": "concession_status",
+      "kind": "FIELD",
+      "prompt": "Do you have an eligible concession card that should be applied to the account?",
+      "fallback_prompt": "Sorry — is that a yes, a no, or are you not sure?",
+      "validation_type": "yes_no_unsure",
+      "required": true,
+      "max_retries": 2,
+      "max_clarifications": 1,
+      "next_step": "life_support",
+      "demo_replies": [
+        "No, I don't.",
+        "Yes, I have one.",
+        "I'm not sure."
+      ]
+    },
+    {
+      "step_id": "life_support",
+      "field_name": "life_support",
+      "kind": "FIELD",
+      "prompt": "Does anyone at the property use life-support equipment that needs a continuous power supply?",
+      "fallback_prompt": "Sorry — is that a yes or a no for life-support equipment at the property?",
+      "validation_type": "yes_no",
+      "required": true,
+      "max_retries": 2,
+      "max_clarifications": 1,
+      "next_step": "contact_preference",
+      "handoff_on_yes": "SENSITIVE_TOPIC",
+      "demo_replies": [
+        "No.",
+        "Yes, my father uses a ventilator."
+      ]
+    },
+    {
+      "step_id": "contact_preference",
+      "field_name": "contact_preference",
+      "kind": "FIELD",
+      "prompt": "And would you prefer we contact you by phone or by email?",
+      "fallback_prompt": "Sorry — should we use phone or email to contact you?",
+      "validation_type": "contact_preference",
+      "required": true,
+      "max_retries": 2,
+      "max_clarifications": 1,
+      "next_step": "confirmation",
+      "demo_replies": [
+        "Email please.",
+        "Phone is fine.",
+        "Either one works."
+      ]
+    },
+    {
+      "step_id": "confirmation",
+      "field_name": "confirmation",
+      "kind": "CONFIRMATION",
+      "prompt": "Let me read that back. Service address: {property_address}. Move-in date: {move_in_date}. Supply needed: {energy_requirement}. Concession: {concession_status}. Life support: {life_support}. Contact preference: {contact_preference}. Have I got all of that right?",
+      "fallback_prompt": "Have I got those details right?",
+      "validation_type": "confirmation",
+      "required": true,
+      "max_retries": 1,
+      "max_clarifications": 0,
+      "next_step": "SUBMIT",
+      "no_retry_policy": "If the customer does not confirm, route to a human. Never loop corrections.",
+      "demo_replies": [
+        "Yes, that's all correct.",
+        "No, that's not right."
+      ]
+    }
+  ]
+}

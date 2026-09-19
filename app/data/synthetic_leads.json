@@ -1,0 +1,145 @@
+{
+  "generated_note": "100% synthetic. Fictional names, reserved-range Australian test numbers (ACMA 0400 000 0xx), example.com email addresses. No real customer PII.",
+  "leads": [
+    {
+      "id": "E-1001",
+      "first_name": "Ava",
+      "last_name": "Thompson",
+      "phone": "+61 400 000 001",
+      "email": "ava.thompson@example.com",
+      "last_completed_step": "customer_continue",
+      "dnc_status": false,
+      "status": "DROPPED_OFF",
+      "vertical": "ENERGY",
+      "preexisting_fields": {},
+      "expected_outcome": "COMPLETED",
+      "scenario_notes": "Happy path. Agrees to continue, gives clean answers for every field, confirms the read-back. Journey submits.",
+      "scripted_turns": {
+        "recording_consent": "Yes, go ahead.",
+        "property_address": "12 Test Street, Sydney NSW 2000",
+        "move_in_date": "1 October 2026",
+        "energy_requirement": "Electricity only.",
+        "concession_status": "No, I don't.",
+        "life_support": "No.",
+        "contact_preference": "Email please.",
+        "confirmation": "Yes, that's all correct."
+      }
+    },
+    {
+      "id": "E-1002",
+      "first_name": "Marcus",
+      "last_name": "Lee",
+      "phone": "+61 400 000 002",
+      "email": "marcus.lee@example.com",
+      "last_completed_step": "property_address",
+      "dnc_status": false,
+      "status": "DROPPED_OFF",
+      "vertical": "ENERGY",
+      "preexisting_fields": {
+        "property_address": "12 Test Street, Sydney NSW 2000"
+      },
+      "expected_outcome": "HANDOFF_REQUESTED",
+      "scenario_notes": "Repeats himself, then explicitly asks for a person. Must warm-hand-off at move_in_date with the address already on file, so he never repeats it.",
+      "scripted_turns": {
+        "recording_consent": "Yeah, fine.",
+        "move_in_date": "I already told someone my details. Let me talk to a person."
+      }
+    },
+    {
+      "id": "E-1003",
+      "first_name": "Priya",
+      "last_name": "Nair",
+      "phone": "+61 400 000 003",
+      "email": "priya.nair@example.com",
+      "last_completed_step": "customer_continue",
+      "dnc_status": true,
+      "status": "DROPPED_OFF",
+      "vertical": "ENERGY",
+      "preexisting_fields": {},
+      "expected_outcome": "DNC_BLOCKED",
+      "scenario_notes": "On the ACMA Do-Not-Call register. No call is ever created and no prompt is ever spoken.",
+      "scripted_turns": {}
+    },
+    {
+      "id": "E-1004",
+      "first_name": "Daniel",
+      "last_name": "Okafor",
+      "phone": "+61 400 000 004",
+      "email": "daniel.okafor@example.com",
+      "last_completed_step": "customer_continue",
+      "dnc_status": false,
+      "status": "DROPPED_OFF",
+      "vertical": "ENERGY",
+      "preexisting_fields": {},
+      "expected_outcome": "DECLINED",
+      "scenario_notes": "Explicit refusal. Thanked once, logged, call ends. No pressure loop, no re-ask, no retry.",
+      "scripted_turns": {
+        "recording_consent": "Stop calling me. I'm not interested."
+      }
+    },
+    {
+      "id": "E-1005",
+      "first_name": "Sofia",
+      "last_name": "Ramirez",
+      "phone": "+61 400 000 005",
+      "email": "sofia.ramirez@example.com",
+      "last_completed_step": "property_address",
+      "dnc_status": false,
+      "status": "DROPPED_OFF",
+      "vertical": "ENERGY",
+      "preexisting_fields": {
+        "property_address": "Unit 4, 88 Sample Road, Parramatta NSW 2150"
+      },
+      "expected_outcome": "HANDOFF_REQUESTED",
+      "scenario_notes": "Vulnerable-customer case. Life-support equipment at the property forces an immediate SENSITIVE_TOPIC handoff. The agent must not advise.",
+      "scripted_turns": {
+        "recording_consent": "Yes, that's fine.",
+        "move_in_date": "15 November 2026",
+        "energy_requirement": "Both, electricity and gas.",
+        "concession_status": "Yes, I have one.",
+        "life_support": "Yes, my father is on a ventilator at home."
+      }
+    },
+    {
+      "id": "E-1006",
+      "first_name": "Tom",
+      "last_name": "Becker",
+      "phone": "+61 400 000 006",
+      "email": "tom.becker@example.com",
+      "last_completed_step": "customer_continue",
+      "dnc_status": false,
+      "status": "DROPPED_OFF",
+      "vertical": "ENERGY",
+      "preexisting_fields": {},
+      "expected_outcome": "HANDOFF_REQUESTED",
+      "scenario_notes": "Offers payment card details mid-journey. Card-like digits must be redacted before storage/display and the call handed off as SENSITIVE_TOPIC.",
+      "scripted_turns": {
+        "recording_consent": "Sure.",
+        "property_address": "5 Demo Avenue, Newcastle NSW 2300",
+        "move_in_date": "3 December 2026",
+        "energy_requirement": "Gas only.",
+        "concession_status": "No.",
+        "life_support": "No.",
+        "contact_preference": "Can I just give you my card number to set up the account? It's 4111 1111 1111 1111."
+      }
+    },
+    {
+      "id": "E-1007",
+      "first_name": "Hannah",
+      "last_name": "Wells",
+      "phone": "+61 400 000 007",
+      "email": "hannah.wells@example.com",
+      "last_completed_step": "customer_continue",
+      "dnc_status": false,
+      "status": "DROPPED_OFF",
+      "vertical": "ENERGY",
+      "preexisting_fields": {},
+      "expected_outcome": "DECLINED",
+      "scenario_notes": "Busy-but-not-refusing. The agent offers exactly one later callback option, confirms the slot, then ends politely. Never a second offer.",
+      "scripted_turns": {
+        "recording_consent": "Now's not great."
+      }
+    }
+  ],
+  "scripted_turn_note": "Keyed by the journey step the customer is answering. The recording-consent prompt and the continue question are a single agent turn, so the customer's first reply is keyed 'recording_consent'."
+}

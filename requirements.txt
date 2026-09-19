@@ -1,0 +1,21 @@
+# --- Core (required, no API keys) -------------------------------------------
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+SQLAlchemy==2.0.36
+
+# --- Config ------------------------------------------------------------------
+# Reads backend/.env. Without it the file is silently ignored, which is a very
+# confusing way to lose an hour. (uvicorn[standard] pulls it in too, but we
+# depend on it directly, so it is declared directly.)
+python-dotenv==1.2.3
+
+# --- Dev / demo tooling ------------------------------------------------------
+httpx==0.28.1
+python-dateutil==2.9.0.post0
+
+# --- OPTIONAL provider adapters ----------------------------------------------
+# None of these are needed. The adapters talk plain HTTP via httpx, so there is
+# no vendor SDK to install — point LLM_BASE_URL at any OpenAI-compatible
+# endpoint, and set DEEPGRAM_API_KEY / ASSEMBLYAI_API_KEY for server-side STT.
+# Twilio is the only one with a real SDK, and it is not required either.

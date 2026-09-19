@@ -1,0 +1,17 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# --- Database (regenerated + seeded on startup) ---
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Local config / secrets ---
+.env
+.env.local
+.env.*.local
