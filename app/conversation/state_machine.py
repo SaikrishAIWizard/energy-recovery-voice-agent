@@ -91,10 +91,19 @@ class EngineResult:
 class ConversationEngine:
     """One instance per request. Stateless between calls — all state lives in SQLite."""
 
-    def __init__(self, db: Session, scripts: ScriptService | None = None) -> None:
+    def __init__(
+        self,
+        db: Session,
+        scripts: ScriptService | None = None,
+        *,
+        defer_transfer: bool = False,
+    ) -> None:
         self.db = db
         self.scripts = scripts or script_service
         self.llm = get_llm()
+        # A Twilio webhook answers with the instructions for the live call itself, so a
+        # handoff raised inside one must not also redirect the call over the REST API.
+        self.defer_transfer = defer_transfer
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -125,6 +134,8 @@ class ConversationEngine:
         confidence: float | None,
         redacted: bool = False,
     ) -> None:
+        if not text.strip():
+            return  # silence on a phone call: nothing was said, so nothing is transcribed
         last_end = self._last_timestamp(session.id)
         self.db.add(
             TranscriptSegment(
@@ -882,9 +893,18 @@ class ConversationEngine:
         # Attempt the live warm transfer through the telephony adapter. With no provider
         # credentials (or no reference) this reports CONSOLE_QUEUE and the handoff waits in
         # the console instead — the customer experience is identical in the local demo.
-        transfer = voice_providers.warm_transfer(
-            session.telephony_reference, settings.handoff_transfer_number
-        )
+        if self.defer_transfer:
+            transfer = {
+                "transferred": False,
+                "mode": "PHONE_WEBHOOK",
+                "detail": "The live call is moved by the webhook's own response.",
+            }
+        else:
+            transfer = voice_providers.warm_transfer(
+                session.telephony_reference,
+                settings.handoff_transfer_number,
+                session_id=session.id,
+            )
         self._audit(session.id, "WARM_TRANSFER_ATTEMPT", json.dumps(transfer))
         self._audit(session.id, "HANDOFF_CREATED", f"reason={reason} signal={signal} :: {note}")
 
@@ -900,11 +920,14 @@ class ConversationEngine:
         self._audit(session.id, "CALL_ENDED", f"Autonomous collection stopped: {reason}")
         self.db.commit()
 
-        transfer_note = (
-            f"Live call transferred to {settings.handoff_transfer_number}."
-            if transfer.get("transferred")
-            else "Handoff queued in the console (no telephony provider configured)."
-        )
+        if transfer.get("transferred"):
+            transfer_note = (
+                "Live call moved into a conference; the human agent is being dialled into it."
+            )
+        elif transfer.get("mode") == "PHONE_WEBHOOK":
+            transfer_note = "Live call is being moved into a conference with the human agent."
+        else:
+            transfer_note = "Handoff queued in the console (no live phone call)."
         return EngineResult(
             session=session,
             agent_messages=messages,
@@ -926,13 +949,17 @@ class ConversationEngine:
         message = "Thanks for your time. I'll end the call here."
         self._say(session, message)
         self.db.flush()
-        return self._end_call(
+        result = self._end_call(
             session,
             status=SessionStatus.DECLINED.value,
             outcome_detail=reason,
             note="Call ended from the console.",
             agent_messages=[message],
         )
+        # A live phone call is a real call: say the line, then hang up on the line.
+        if session.dial_provider == "twilio":
+            voice_providers.end_live_call(session.telephony_reference, message)
+        return result
 
     def _end_call(
         self,

@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.schemas import LeadDetailOut, LeadQueueItem, LeadOut
+from app.models import FieldSource, FieldStatus
+from app.schemas import LeadDetailOut, LeadOut, LeadQueueItem, SessionSummary
 from app.services import dnc_service, lead_service, session_service
 from app.services.script_service import script_service
 
@@ -34,6 +35,35 @@ def list_leads(db: Session = Depends(get_db)) -> list[LeadQueueItem]:
             )
         )
     return items
+
+
+@router.get("/leads/{lead_id}/sessions", response_model=list[SessionSummary])
+def lead_sessions(lead_id: str, db: Session = Depends(get_db)) -> list[SessionSummary]:
+    """A lead's whole call history. The queue shows only the latest call; this is how an
+    earlier one (a handoff, a phone call) stays reachable after a newer call starts."""
+    if lead_service.get_lead(db, lead_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown lead {lead_id}")
+    return [
+        SessionSummary(
+            id=session.id,
+            status=session.status,
+            mode=session.mode,
+            dial_provider=session.dial_provider,
+            started_at=session.started_at,
+            ended_at=session.ended_at,
+            outcome_detail=session.outcome_detail,
+            handoff_reason=session.handoff_reason,
+            transcript_segments=len(session.transcript),
+            fields_captured=sum(
+                1
+                for row in session.journey_fields
+                if row.status == FieldStatus.VALID.value
+                and row.source != FieldSource.PREEXISTING.value
+                and row.field_name in script_service.data_fields
+            ),
+        )
+        for session in lead_service.sessions_for_lead(db, lead_id)
+    ]
 
 
 @router.get("/leads/{lead_id}", response_model=LeadDetailOut)

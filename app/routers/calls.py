@@ -7,6 +7,7 @@ import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.conversation.state_machine import ConversationEngine
@@ -17,6 +18,7 @@ from app.schemas import (
     CallSessionOut,
     EndCallRequest,
     FieldCaptureRequest,
+    HandoffListItem,
     HandoffOut,
     HandoffRequest,
     StartCallRequest,
@@ -186,6 +188,30 @@ def get_transcript(
 ) -> list[TranscriptSegmentOut]:
     session = _load_session(db, call_session_id)
     return [TranscriptSegmentOut.model_validate(seg) for seg in session.transcript]
+
+
+@router.get("/handoffs", response_model=list[HandoffListItem])
+def list_handoffs(db: Session = Depends(get_db)) -> list[HandoffListItem]:
+    """Every call currently waiting on a human — including one a newer call has since
+    pushed out of its lead's "latest call" slot."""
+    sessions = db.execute(
+        select(CallSession)
+        .where(CallSession.status == "HANDOFF_REQUESTED")
+        .order_by(CallSession.ended_at.desc(), CallSession.id.desc())
+    ).scalars()
+    return [
+        HandoffListItem(
+            session_id=session.id,
+            lead_id=session.lead_id,
+            name=f"{session.lead.first_name} {session.lead.last_name or ''}".strip(),
+            reason=session.handoff.reason,
+            accepted_by=session.handoff.accepted_by,
+            created_at=session.handoff.created_at,
+            context_summary=session.handoff.context_summary,
+        )
+        for session in sessions
+        if session.handoff is not None
+    ]
 
 
 @router.get("/calls/{call_session_id}/handoff", response_model=HandoffOut)

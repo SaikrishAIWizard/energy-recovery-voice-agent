@@ -22,6 +22,7 @@ registered but never called would be a lie, so the registry keeps the two groups
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -54,9 +55,13 @@ class TelephonyProvider(Protocol):
     name: str
     available: bool
 
-    def place_call(self, to_number: str, from_number: str | None = None) -> dict[str, Any]: ...
+    def place_call(
+        self, to_number: str, from_number: str | None = None, session_id: str | None = None
+    ) -> dict[str, Any]: ...
 
-    def transfer(self, call_reference: str, to_number: str) -> dict[str, Any]: ...
+    def transfer(
+        self, call_reference: str, to_number: str, session_id: str | None = None
+    ) -> dict[str, Any]: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -107,14 +112,18 @@ class NoOpTelephony:
     name: str = "browser_microphone"
     available: bool = True
 
-    def place_call(self, to_number: str, from_number: str | None = None) -> dict[str, Any]:
+    def place_call(
+        self, to_number: str, from_number: str | None = None, session_id: str | None = None
+    ) -> dict[str, Any]:
         return {
             "placed": False,
             "mode": "LOCAL_BROWSER",
-            "detail": "No telephony provider configured — the console runs the call locally.",
+            "detail": "No phone call placed — the console runs the call in the browser.",
         }
 
-    def transfer(self, call_reference: str, to_number: str) -> dict[str, Any]:
+    def transfer(
+        self, call_reference: str, to_number: str, session_id: str | None = None
+    ) -> dict[str, Any]:
         return {
             "transferred": False,
             "mode": "LOCAL_BROWSER",
@@ -305,49 +314,123 @@ class OpenAIWhisperSTT:
 
 @dataclass
 class TwilioTelephony:
+    """Real phone calls through Twilio's REST API.
+
+    Twilio does the listening and speaking (speech recognition and text-to-speech); the
+    backend supplies the instructions (TwiML) from the webhooks in `routers/twilio.py`. The
+    state machine still decides everything — this class only places, redirects and ends
+    calls.
+    """
+
     account_sid: str
     auth_token: str
     from_number: str
     name: str = "twilio"
     available: bool = field(init=False, default=True)
 
-    def place_call(self, to_number: str, from_number: str | None = None) -> dict[str, Any]:
-        try:
-            import httpx
+    # -- plumbing ------------------------------------------------------------ #
+    def _post(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
+        import httpx
 
-            response = httpx.post(
-                f"https://api.twilio.com/2010-04-01/Accounts/{self.account_sid}/Calls.json",
-                auth=(self.account_sid, self.auth_token),
-                data={
-                    "To": to_number,
+        response = httpx.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{self.account_sid}/{path}",
+            auth=(self.account_sid, self.auth_token),
+            data=data,
+            timeout=20.0,
+        )
+        if response.status_code >= 400:
+            try:
+                detail = response.json().get("message") or response.text
+            except ValueError:
+                detail = response.text
+            raise RuntimeError(f"Twilio {response.status_code}: {detail}")
+        return response.json()
+
+    @staticmethod
+    def _e164(number: str) -> str:
+        return re.sub(r"[^\d+]", "", number or "")
+
+    # -- calls ---------------------------------------------------------------- #
+    def place_call(
+        self, to_number: str, from_number: str | None = None, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Ring the customer. When they answer, Twilio asks `/twilio/voice/{session}` what to do."""
+        if not session_id or not settings.public_base_url:
+            return {"placed": False, "error": "PUBLIC_BASE_URL and a session are required."}
+        try:
+            body = self._post(
+                "Calls.json",
+                {
+                    "To": self._e164(to_number),
                     "From": from_number or self.from_number,
-                    "Url": "http://demo.invalid/twiml",
+                    "Url": settings.public_url(f"/twilio/voice/{session_id}"),
+                    "Method": "POST",
+                    "StatusCallback": settings.public_url(f"/twilio/status/{session_id}"),
+                    "StatusCallbackMethod": "POST",
+                    "StatusCallbackEvent": ["ringing", "answered", "completed"],
+                    "Timeout": 30,
                 },
-                timeout=20.0,
             )
-            response.raise_for_status()
-            body = response.json()
             return {"placed": True, "call_reference": body.get("sid"), "provider": self.name}
         except Exception as exc:  # pragma: no cover - network path
             logger.warning("Twilio place_call failed: %s", exc)
             return {"placed": False, "error": str(exc)}
 
-    def transfer(self, call_reference: str, to_number: str) -> dict[str, Any]:
-        try:
-            import httpx
+    def transfer(
+        self, call_reference: str, to_number: str, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Move the customer's live call into the handoff conference.
 
-            response = httpx.post(
-                f"https://api.twilio.com/2010-04-01/Accounts/{self.account_sid}"
-                f"/Calls/{call_reference}.json",
-                auth=(self.account_sid, self.auth_token),
-                data={"Twiml": f"<Response><Dial>{to_number}</Dial></Response>"},
-                timeout=20.0,
+        The redirect target dials the human agent into that same conference, so `to_number`
+        is not needed here; it is kept so every provider shares one signature.
+        """
+        if not session_id or not settings.public_base_url:
+            return {"transferred": False, "error": "PUBLIC_BASE_URL and a session are required."}
+        try:
+            self._post(
+                f"Calls/{call_reference}.json",
+                {"Url": settings.public_url(f"/twilio/handoff/{session_id}"), "Method": "POST"},
             )
-            response.raise_for_status()
-            return {"transferred": True, "provider": self.name}
+            return {"transferred": True, "mode": "TWILIO_CONFERENCE", "provider": self.name}
         except Exception as exc:  # pragma: no cover - network path
             logger.warning("Twilio transfer failed: %s", exc)
             return {"transferred": False, "error": str(exc)}
+
+    def place_agent_call(self, to_number: str, session_id: str) -> dict[str, Any]:
+        """Ring the human agent. Their leg joins the customer's conference once they accept."""
+        try:
+            body = self._post(
+                "Calls.json",
+                {
+                    "To": self._e164(to_number),
+                    "From": self.from_number,
+                    "Url": settings.public_url(f"/twilio/agent/{session_id}"),
+                    "Method": "POST",
+                    "StatusCallback": settings.public_url(f"/twilio/agent-status/{session_id}"),
+                    "StatusCallbackMethod": "POST",
+                    "StatusCallbackEvent": ["completed"],
+                    "Timeout": 30,
+                },
+            )
+            return {"placed": True, "call_reference": body.get("sid"), "provider": self.name}
+        except Exception as exc:  # pragma: no cover - network path
+            logger.warning("Twilio agent call failed: %s", exc)
+            return {"placed": False, "error": str(exc)}
+
+    def say_and_hangup(self, call_reference: str, text: str) -> dict[str, Any]:
+        """Speak one last line on a live call, then end it."""
+        from xml.sax.saxutils import escape, quoteattr
+
+        twiml = (
+            f"<Response><Say voice={quoteattr(settings.twilio_say_voice)}>{escape(text)}</Say>"
+            "<Hangup/></Response>"
+        )
+        try:
+            self._post(f"Calls/{call_reference}.json", {"Twiml": twiml})
+            return {"ended": True, "provider": self.name}
+        except Exception as exc:  # pragma: no cover - network path
+            logger.warning("Twilio hangup failed: %s", exc)
+            return {"ended": False, "error": str(exc)}
 
 
 # --------------------------------------------------------------------------- #
@@ -465,32 +548,72 @@ class VoiceProviderRegistry:
     def telephony_provider(self) -> TelephonyProvider:
         return self.telephony[self.active_telephony]
 
-    def dial(self, to_number: str) -> dict[str, Any]:
-        provider = self.telephony_provider
+    def dial(
+        self, to_number: str, *, live: bool = False, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Place a call. Only `live=True` rings a real phone.
+
+        Starting a recovery does not dial by itself: the console call runs in the browser,
+        and the operator chooses "Start call by agent" to have the assistant phone the
+        customer. That explicit step is what reaches Twilio.
+        """
+        provider = (
+            self.telephony["twilio"]
+            if live and "twilio" in self.telephony
+            else self.telephony["browser_microphone"]
+        )
         try:
-            result = provider.place_call(to_number)
+            result = provider.place_call(to_number, session_id=session_id)
         except Exception as exc:  # pragma: no cover - provider path
             logger.warning("%s place_call failed: %s", provider.name, exc)
             result = {"placed": False, "provider": provider.name, "error": str(exc)}
         result.setdefault("provider", provider.name)
         return result
 
-    def warm_transfer(self, call_reference: str | None, to_number: str | None) -> dict[str, Any]:
+    def warm_transfer(
+        self,
+        call_reference: str | None,
+        to_number: str | None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Hand a live call to the human agent.
+
+        With Twilio the customer's call is redirected into a conference and the agent is
+        dialled into it by that redirect's webhook, so the customer never hears a dial tone
+        and never has to call back. Without a live call it is a console-queue handoff.
+        """
         provider = self.telephony_provider
-        if not call_reference or not to_number:
+        if not call_reference or (provider.name != "twilio" and not to_number):
             return {
                 "transferred": False,
                 "provider": provider.name,
                 "mode": "CONSOLE_QUEUE",
-                "detail": "No telephony reference — handoff is queued in the console instead.",
+                "detail": "No live phone call — the handoff is queued in the console instead.",
             }
         try:
-            result = provider.transfer(call_reference, to_number)
+            result = provider.transfer(call_reference, to_number or "", session_id=session_id)
         except Exception as exc:  # pragma: no cover - provider path
             logger.warning("%s transfer failed: %s", provider.name, exc)
             result = {"transferred": False, "provider": provider.name, "error": str(exc)}
         result.setdefault("provider", provider.name)
         return result
+
+    @property
+    def live_calls_available(self) -> bool:
+        return "twilio" in self.telephony and settings.live_calls_enabled
+
+    def place_agent_call(self, to_number: str, session_id: str) -> dict[str, Any]:
+        provider = self.telephony.get("twilio")
+        if provider is None:
+            return {"placed": False, "error": "Twilio is not configured."}
+        return provider.place_agent_call(to_number, session_id)  # type: ignore[attr-defined]
+
+    def end_live_call(self, call_reference: str | None, text: str) -> dict[str, Any]:
+        """Say goodbye and hang up a live phone call. A no-op for a browser call."""
+        provider = self.telephony.get("twilio")
+        if provider is None or not call_reference:
+            return {"ended": False}
+        return provider.say_and_hangup(call_reference, text)  # type: ignore[attr-defined]
 
 
 voice_providers = VoiceProviderRegistry()

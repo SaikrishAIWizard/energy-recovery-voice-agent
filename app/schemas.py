@@ -246,6 +246,33 @@ class StartCallResponse(BaseModel):
     system_notes: list[str] = Field(default_factory=list)
 
 
+class SessionSummary(BaseModel):
+    """One call in a lead's history — enough to recognise it and open it."""
+
+    id: str
+    status: str
+    mode: str
+    dial_provider: str | None = None
+    started_at: datetime
+    ended_at: datetime | None = None
+    outcome_detail: str | None = None
+    handoff_reason: str | None = None
+    transcript_segments: int = 0
+    fields_captured: int = 0
+
+
+class HandoffListItem(BaseModel):
+    """A call waiting on a human, whether or not it is still the lead's latest call."""
+
+    session_id: str
+    lead_id: str
+    name: str
+    reason: str
+    accepted_by: str | None = None
+    created_at: datetime
+    context_summary: str
+
+
 class RecordingUploadResponse(BaseModel):
     """Result of analysing an uploaded call recording."""
 

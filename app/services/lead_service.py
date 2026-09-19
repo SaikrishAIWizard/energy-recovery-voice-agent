@@ -8,7 +8,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import (
-    RECORDING_UPLOAD_MODE,
     CallSession,
     FieldStatus,
     Lead,
@@ -34,19 +33,27 @@ def latest_session(db: Session, lead_id: str) -> CallSession | None:
     ).scalars().first()
 
 
-def carried_fields(db: Session, lead_id: str) -> dict[str, str]:
-    """Journey fields an uploaded recording already captured for this lead.
+def sessions_for_lead(db: Session, lead_id: str) -> list[CallSession]:
+    """Every call ever made for the lead, newest first."""
+    return list(
+        db.execute(
+            select(CallSession)
+            .where(CallSession.lead_id == lead_id)
+            .order_by(CallSession.started_at.desc(), CallSession.id.desc())
+        ).scalars()
+    )
 
-    Only applies while that incomplete recording is the lead's most recent session: once a
-    recovery call has been started (or anything else has happened) it is no longer the
-    freshest source of truth, so stale values are never silently carried into a new call.
+
+def carried_fields(db: Session, lead_id: str) -> dict[str, str]:
+    """Journey fields an earlier, incomplete attempt already captured for this lead.
+
+    That is an uploaded recording with items missing, or a phone call the customer hung up
+    on part-way. It only applies while that attempt is the lead's most recent session: once
+    a newer call has started it is no longer the freshest source of truth, so stale values
+    are never silently carried into another call.
     """
     session = latest_session(db, lead_id)
-    if (
-        session is None
-        or session.mode != RECORDING_UPLOAD_MODE
-        or session.status != SessionStatus.INCOMPLETE.value
-    ):
+    if session is None or session.status != SessionStatus.INCOMPLETE.value:
         return {}
     return {
         row.field_name: row.value

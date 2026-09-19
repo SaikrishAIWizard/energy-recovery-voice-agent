@@ -69,6 +69,11 @@ def _env(name: str) -> str | None:
     return value.strip() if value and value.strip() else None
 
 
+def _env_default_on(name: str) -> bool:
+    """True unless the variable is explicitly switched off."""
+    return os.getenv(name, "").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _first_env(*names: str) -> str | None:
     for name in names:
         value = _env(name)
@@ -123,10 +128,30 @@ class Settings:
     twilio_auth_token: str | None = field(default_factory=lambda: _env("TWILIO_AUTH_TOKEN"))
     twilio_from_number: str | None = field(default_factory=lambda: _env("TWILIO_FROM_NUMBER"))
 
-    # Where a warm handoff transfers the live call. Unset -> the handoff is queued in the
-    # console instead, which is how the local demo runs.
+    # The human agent's phone. On a live call, a handoff dials this number into the same
+    # call (a Twilio conference). Unset -> the handoff is queued in the console instead.
     handoff_transfer_number: str | None = field(
         default_factory=lambda: _env("HANDOFF_TRANSFER_NUMBER")
+    )
+
+    # Public HTTPS address Twilio can reach this backend on (e.g. an ngrok URL). Twilio
+    # fetches call instructions from it, so a real phone call cannot happen without it.
+    public_base_url: str | None = field(
+        default_factory=lambda: (_env("PUBLIC_BASE_URL") or "").rstrip("/") or None
+    )
+    # How the assistant sounds and listens on the phone.
+    twilio_say_voice: str = field(default_factory=lambda: _env("TWILIO_SAY_VOICE") or "Polly.Nicole")
+    twilio_speech_language: str = field(
+        default_factory=lambda: _env("TWILIO_SPEECH_LANGUAGE") or "en-AU"
+    )
+    # Reject webhook requests that Twilio did not sign. Leave on outside local curl testing.
+    twilio_validate_signature: bool = field(
+        default_factory=lambda: _env_default_on("TWILIO_VALIDATE_SIGNATURE")
+    )
+    # Demo/trial safety net: dial this number instead of the lead's (a Twilio trial can only
+    # call numbers you have verified, and the seeded leads have synthetic numbers).
+    twilio_dial_override_number: str | None = field(
+        default_factory=lambda: _env("TWILIO_DIAL_OVERRIDE_NUMBER")
     )
 
     # -- derived ---------------------------------------------------------------- #
@@ -137,6 +162,14 @@ class Settings:
     @property
     def telephony_enabled(self) -> bool:
         return bool(self.twilio_account_sid and self.twilio_auth_token and self.twilio_from_number)
+
+    @property
+    def live_calls_enabled(self) -> bool:
+        """Real phone calls need Twilio credentials AND a public URL for its webhooks."""
+        return self.telephony_enabled and bool(self.public_base_url)
+
+    def public_url(self, path: str) -> str:
+        return f"{self.public_base_url or ''}{path}"
 
     @property
     def server_stt_providers(self) -> list[str]:
@@ -198,6 +231,13 @@ class Settings:
             "telephony": {
                 "browser_microphone": True,
                 "twilio": self.telephony_enabled,
+                # Real outbound phone calls driven by the agent (needs PUBLIC_BASE_URL).
+                "live_calls": self.live_calls_enabled,
+                "public_base_url_set": bool(self.public_base_url),
+                # A handoff can dial a human into the same call.
+                "handoff_agent_number_set": bool(self.handoff_transfer_number),
+                "dial_override_active": bool(self.twilio_dial_override_number),
+                "webhook_signature_validation": self.twilio_validate_signature,
             },
         }
 

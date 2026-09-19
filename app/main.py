@@ -8,17 +8,19 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select
 
 from app.config import ENV_FILE, MIN_FIELD_CONFIDENCE, settings
 from app.database import SessionLocal, init_db
 from app.models import CallSession, Lead
-from app.routers import calls, dashboard, database_viewer, journey, leads, recordings
+from app.routers import calls, dashboard, database_viewer, journey, leads, recordings, twilio
 from app.seed import ensure_seeded
 from app.services.llm_service import llm_status
 from app.services.script_service import script_service
+from app.services.twilio_service import TwilioError
 from app.services.voice_service import voice_providers
 
 logging.basicConfig(
@@ -56,6 +58,29 @@ async def lifespan(_: FastAPI):
         "Server-side STT: %s",
         ", ".join(voice_providers.server_stt) or "none (the browser transcribes)",
     )
+    if voice_providers.live_calls_available:
+        logger.info(
+            "Phone calls: ON. Twilio webhooks at %s/twilio/... | human agent line: %s | "
+            "signature check: %s%s",
+            settings.public_base_url,
+            "set" if settings.handoff_transfer_number else "NOT set (handoffs stay in the console)",
+            "on" if settings.twilio_validate_signature else "OFF",
+            " | dial override ACTIVE" if settings.twilio_dial_override_number else "",
+        )
+        if not (settings.public_base_url or "").startswith("https://"):
+            logger.warning("PUBLIC_BASE_URL is not https; Twilio only calls public HTTPS URLs.")
+    else:
+        missing = [
+            name
+            for name, ok in (
+                ("TWILIO_ACCOUNT_SID", settings.twilio_account_sid),
+                ("TWILIO_AUTH_TOKEN", settings.twilio_auth_token),
+                ("TWILIO_FROM_NUMBER", settings.twilio_from_number),
+                ("PUBLIC_BASE_URL", settings.public_base_url),
+            )
+            if not ok
+        ]
+        logger.info("Phone calls: OFF (browser console only). Missing: %s", ", ".join(missing))
     logger.info(
         "Core demo runs with NO API keys. Confidence floor for a field capture: %.2f",
         MIN_FIELD_CONFIDENCE,
@@ -89,9 +114,15 @@ app.add_middleware(
 app.include_router(leads.router)
 app.include_router(calls.router)
 app.include_router(recordings.router)
+app.include_router(twilio.router)
 app.include_router(journey.router)
 app.include_router(dashboard.router)
 app.include_router(database_viewer.router)
+
+
+@app.exception_handler(TwilioError)
+async def _twilio_error(_: Request, exc: TwilioError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
 @app.get("/health", tags=["system"])
