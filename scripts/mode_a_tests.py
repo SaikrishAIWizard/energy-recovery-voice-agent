@@ -124,7 +124,7 @@ def main() -> int:
 
         print("\nSCENARIO 5 — human captures the rest and completes the journey")
         for field, value in [
-            ("move_in_date", "1 October 2026"),
+            ("move_in_date", "1 October 2030"),
             ("energy_requirement", "Electricity"),
             ("concession_status", "No"),
             ("life_support", "No"),

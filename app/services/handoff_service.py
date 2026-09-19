@@ -48,6 +48,7 @@ def build_context_summary(
     collected: dict[str, Any],
     reason: str,
     current_step: str,
+    unconfirmed: dict[str, Any] | None = None,
 ) -> str:
     parts: list[str] = []
 
@@ -68,6 +69,14 @@ def build_context_summary(
     ]
     if preexisting:
         parts.append("Already captured on this call: " + ", ".join(preexisting) + ".")
+
+    heard = [
+        f"{FIELD_LABELS.get(key, key)} ({value})"
+        for key, value in (unconfirmed or {}).items()
+        if value and collected.get(key) in (None, "")
+    ]
+    if heard:
+        parts.append("Heard but not yet confirmed by the customer: " + ", ".join(heard) + ".")
 
     missing = [
         FIELD_LABELS.get(key, key)
@@ -94,6 +103,28 @@ def serialize_handoff(handoff: Handoff, lead: Any | None = None) -> dict[str, An
     except json.JSONDecodeError:
         collected_fields = {}
 
+    # Everything the human needs so the customer never repeats themselves: what was
+    # captured (with how sure we are and where it came from), what is still outstanding,
+    # and whether the recording disclosure was made.
+    session = handoff.call_session
+    rows = {row.field_name: row for row in (session.journey_fields if session else [])}
+    field_details: dict[str, dict[str, Any]] = {}
+    for name in FIELD_LABELS:
+        row = rows.get(name)
+        if row is not None and row.value is not None:
+            field_details[name] = {
+                "value": row.value,
+                "status": row.status,
+                "confidence": row.confidence,
+                "source": row.source,
+            }
+    # Live, not a snapshot: it shrinks as the human agent fills the gaps in.
+    outstanding_fields = [
+        name
+        for name in FIELD_LABELS
+        if not (rows.get(name) is not None and rows[name].status == "VALID" and rows[name].value)
+    ]
+
     known_contact: dict[str, Any] = {}
     if lead is not None:
         known_contact = {
@@ -117,6 +148,9 @@ def serialize_handoff(handoff: Handoff, lead: Any | None = None) -> dict[str, An
         "escalation_signal": ESCALATION_LABELS.get(handoff.reason),
         "lead_id": lead.id if lead is not None else None,
         "known_contact": known_contact,
+        "outstanding_fields": outstanding_fields,
+        "field_details": field_details,
+        "recording_disclosed": bool(session.recording_consent_disclosed) if session else False,
     }
 
 

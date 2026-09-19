@@ -121,7 +121,7 @@ def _say(text: str) -> str:
 def _gather(prompts: list[str], action: str) -> str:
     """Speak the prompt(s) and listen for the reply. The prompt sits inside the Gather so
     the customer can talk over it. `actionOnEmptyResult` sends silence to the same webhook,
-    where the state machine treats it as a failed capture (one clarification, then handoff)."""
+    where the state machine treats it as a failed capture (follow-ups, then handoff)."""
     return (
         '<Gather input="speech" method="POST" speechTimeout="auto" timeout="6" '
         'speechModel="phone_call" actionOnEmptyResult="true" '
@@ -329,7 +329,13 @@ def call_status(db: Session, session_id: str, params: dict[str, str]) -> None:
     if status == "ringing":
         _audit(db, session, "PHONE_CALL_RINGING", params.get("CallSid", ""))
     elif status in UNANSWERED or status == "completed":
-        if session.state in TERMINAL_STATES:
+        if session.state == "CLOSING":
+            # Submitted, and only "anything else?" was left: the call is complete.
+            session.state = "COMPLETED"
+            session.ended_at = session.ended_at or utcnow()
+            _audit(db, session, "PHONE_CALL_ENDED", f"status={status} after submission")
+            _audit(db, session, "CALL_ENDED", "Journey completed by AI voice agent.")
+        elif session.state in TERMINAL_STATES:
             _audit(db, session, "PHONE_CALL_ENDED", f"status={status}")
         elif "PHONE_CALL_ANSWERED" not in _events(session):
             # Never picked up: back to the browser channel so the operator can try again.

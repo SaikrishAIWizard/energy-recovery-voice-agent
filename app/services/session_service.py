@@ -70,7 +70,7 @@ def _progress(session: CallSession) -> list[StepProgress]:
         if step_id == "recording_consent":
             status = "DONE" if session.recording_consent_disclosed else "PENDING"
         elif step_id == "confirmation":
-            if session.state == "COMPLETED":
+            if session.state in {"COMPLETED", "CLOSING"}:
                 status = "DONE"
             elif session.current_step == "confirmation" and not terminal:
                 status = "ACTIVE"
@@ -164,7 +164,7 @@ def serialize_session(db: Session, session: CallSession) -> CallSessionOut:
         safety_flags=safety_flags,
         last_agent_message=last_agent,
         last_customer_message=last_customer,
-        demo_replies=script_service.demo_replies(session.current_step),
+        demo_replies=script_service.demo_replies_for(session.state, session.current_step),
     )
 
 

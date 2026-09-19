@@ -31,8 +31,28 @@ def _lookup_register(phone: str) -> bool:
     return False
 
 
+def _customer_opted_out(lead: Lead) -> bool:
+    """The lead is flagged because the customer themselves asked us to stop, on a call we
+    logged, as opposed to being on the register."""
+    return any(
+        event.event_type == "DNC_REQUEST_LOGGED"
+        for session in lead.call_sessions
+        for event in session.audit_events
+    )
+
+
 def check(lead: Lead, force: bool = False) -> DNCCheckResult:
     if lead.dnc_status:
+        if _customer_opted_out(lead):
+            # A customer's own request is never overridable, demo override included.
+            return DNCCheckResult(
+                allowed=False,
+                code="DNC_CUSTOMER_REQUEST",
+                detail=(
+                    f"{lead.phone} asked not to be contacted again on an earlier call. "
+                    "Dialling refused; this cannot be overridden."
+                ),
+            )
         if force:
             return DNCCheckResult(
                 allowed=True,

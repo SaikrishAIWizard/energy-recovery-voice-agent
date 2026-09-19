@@ -63,5 +63,24 @@ def seed(db: Session, *, reset: bool = False) -> dict[str, int]:
     return {"created": created, "total": total}
 
 
+def restore_seed_leads(db: Session) -> int:
+    """Put the synthetic leads back exactly as seeded.
+
+    A do-not-call request flags the lead itself, so clearing call history alone would leave
+    a demo lead blocked for good. Only the seeded leads are touched; a lead created from an
+    uploaded recording keeps its flag.
+    """
+    restored = 0
+    for entry in load_synthetic_leads():
+        lead = db.get(Lead, entry["id"])
+        if lead is None:
+            continue
+        lead.dnc_status = bool(entry["dnc_status"])
+        lead.status = LeadStatus.DROPPED_OFF.value
+        restored += 1
+    db.commit()
+    return restored
+
+
 def ensure_seeded(db: Session) -> dict[str, int]:
     return seed(db, reset=False)

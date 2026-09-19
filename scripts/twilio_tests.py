@@ -18,6 +18,7 @@ that Twilio accepts the TwiML. That needs one real call (see the README).
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import sys
 import tempfile
@@ -204,35 +205,47 @@ def main() -> int:
 
         script = [
             ("Yes, go ahead.", "service address"),
-            ("12 Test Street, Sydney NSW 2000", "moving into"),
-            ("1 December 2030", "electricity, gas, or both"),
-            ("electricity and gas", "concession"),
+            ("12 Test Street, Sydney NSW 2000", "I have 12 Test Street, Sydney NSW 2000. Is that correct?"),
+            ("yes", "moving into"),
+            ("1 December 2030", "I have 1 December 2030. Is that correct?"),
+            ("yes", "electricity, gas, or both"),
+            ("electricity and gas", "Is that right?"),
+            ("yes", "concession"),
             ("No", "life-support"),
-            ("No", "phone or by email"),
-            ("email please", "read that back"),
+            ("No", "phone or email"),
+            ("email please", "check I have this right"),
         ]
         for said, expect in script:
             xml = call.say(said).text
             check(f"after '{said}' the agent asks about: {expect}", expect in xml and "<Gather" in xml, xml[:160] if expect not in xml else "")
         xml = call.say("yes that's right").text
-        check("confirmation ends the call with a hangup", "<Hangup/>" in xml and "submitted" in xml, xml[:200])
+        check("confirmation is followed by the closing question, not a hangup", "<Gather" in xml and "submitted" in xml and "anything else you need from a team member" in xml and "<Hangup/>" not in xml, xml[:200])
         session = call.session()
         check("journey COMPLETED and submitted", session["status"] == "COMPLETED" and session["submission"] is not None, session["status"])
+        check("call stays open for the closing answer", session["state"] == "CLOSING", session["state"])
+        xml = call.say("No, that's everything, thanks.").text
+        check("'nothing else' ends the call with goodbye and a hangup", "<Hangup/>" in xml and "Goodbye" in xml, xml[:160])
+        check("call is now fully COMPLETED", call.session()["state"] == "COMPLETED")
         check("spoken answers are the payload", (session["submission"] or {}).get("payload", {}).get("energy_requirement") == "BOTH")
         check("customer's words are in the transcript", any(s["speaker"] == "CUSTOMER" and "12 Test Street" in s["text"] for s in session["transcript"]))
         hook(client, f"/twilio/status/{call.id}", {"CallSid": call.sid, "CallStatus": "completed"})
         check("the hang-up after completion is just logged", "PHONE_CALL_ENDED" in call.audit() and call.session()["status"] == "COMPLETED")
 
-        print("\n5. Silence is a failed capture: one clarification, then a human")
+        print("\n5. Silence is a failed capture: three follow-ups, then a human")
         quiet = Phone(client, "E-1004")
         quiet.dial()
         quiet.answer()
         xml = quiet.say(None).text
-        check("first silence -> the approved fallback prompt", "Sorry, I didn" in xml and "<Gather" in xml, xml[:200])
+        check("first silence -> follow-up 1, the approved re-ask", "Sorry, I didn" in xml and "<Gather" in xml, xml[:200])
         n = sum(1 for s in quiet.session()["transcript"] if s["speaker"] == "CUSTOMER")
         check("silence adds no empty transcript line", n == 0, str(n))
         xml = quiet.say(None).text
-        check("second silence -> handoff, customer redirected to the conference", f"/twilio/handoff/{quiet.id}?spoken=1" in xml and "<Redirect" in xml, xml[:250])
+        check("second silence -> follow-up 2, simpler", "Please answer yes or no" in xml and "<Gather" in xml, xml[:200])
+        xml = quiet.say(None).text
+        check("third silence -> follow-up 3", "Just yes or no" in xml and "<Gather" in xml, xml[:200])
+        check("still on the call, not handed off yet", quiet.session()["status"] == "ACTIVE")
+        xml = quiet.say(None).text
+        check("fourth silence -> handoff, customer redirected to the conference", f"/twilio/handoff/{quiet.id}?spoken=1" in xml and "<Redirect" in xml, xml[:250])
         check("the engine did not also redirect over REST", not any(quiet.sid in u for u, _ in updates()), str(updates()))
         check("session is HANDOFF_REQUESTED", quiet.session()["status"] == "HANDOFF_REQUESTED")
 
@@ -394,12 +407,26 @@ def main() -> int:
         drop.answer()
         drop.say("Yes, go ahead.")
         drop.say("1 December 2030")
+        drop.say("yes")  # the read-back: an unconfirmed date is not kept
         hook(client, f"/twilio/status/{drop.id}", {"CallSid": drop.sid, "CallStatus": "completed"})
         s = drop.session()
         check("session INCOMPLETE, outcome PHONE_HANG_UP", s["status"] == "INCOMPLETE" and s["outcome_detail"] == "PHONE_HANG_UP", f"{s['status']}/{s['outcome_detail']}")
         item = next(i for i in client.get("/leads").json() if i["lead"]["id"] == "E-1005")
         check("lead is back in the recovery queue", item["lead"]["status"] == "DROPPED_OFF" and item["latest_session_status"] == "INCOMPLETE")
         check("queue resumes after what was captured", item["resume_step"] == "energy_requirement", item["resume_step"])
+
+        print("\n11b. Hanging up on the closing question does not undo a submitted journey")
+        done = Phone(client, "E-1001")
+        done.dial()
+        done.answer()
+        for said in ["Yes, go ahead.", "12 Test Street, Sydney NSW 2000", "yes", "1 December 2030", "yes", "gas", "yes",
+                     "No", "No", "email", "yes that's all correct"]:
+            done.say(said)
+        check("submitted and waiting on the closing answer", done.session()["state"] == "CLOSING" and done.session()["submission"] is not None)
+        hook(client, f"/twilio/status/{done.id}", {"CallSid": done.sid, "CallStatus": "completed"})
+        s2 = done.session()
+        check("customer hanging up leaves it COMPLETED (not INCOMPLETE)", s2["status"] == "COMPLETED" and s2["state"] == "COMPLETED", f"{s2['status']}/{s2['state']}")
+        check("submission is intact", s2["submission"] is not None)
 
         print("\n12. Guardrails still apply on the phone")
         dnc = Phone(client, "E-1003", force=True)
@@ -412,6 +439,19 @@ def main() -> int:
         xml = card.say("my card number is 4111 1111 1111 1111").text
         check("card number -> handoff, never echoed", "<Redirect" in xml and "4111" not in xml)
         check("card number redacted in the transcript", not any("4111 1111" in s["text"] for s in card.session()["transcript"]))
+
+        stop = Phone(client, "E-1005")
+        stop.dial()
+        stop.answer()
+        xml = stop.say("Please stop calling me.").text
+        check("'stop calling me' on the phone: acknowledged, then a hangup", "Understood. I will record that request" in xml and "<Hangup/>" in xml, xml[:160])
+        flagged = next(i for i in client.get("/leads").json() if i["lead"]["id"] == "E-1005")
+        check("the lead is flagged Do-Not-Call", flagged["lead"]["dnc_status"] is True and flagged["can_start"] is False)
+        n = len(created_calls())
+        again = Phone(client, "E-1005", force=True)
+        r = again.dial()
+        check("no further call is ever placed, even forced", r.status_code == 409 and len(created_calls()) == n, r.text[:140])
+        check("...and the refusal names the customer's own request", client.get(f"/calls/{again.id}").json()["outcome_detail"] == "DNC_CUSTOMER_REQUEST")
 
         print("\n12b. An earlier call is never buried by a newer one")
         # E-1004's phone call (section 5/6) ended in a handoff. Start another call for the lead.

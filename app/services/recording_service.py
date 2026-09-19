@@ -131,17 +131,20 @@ _SPLIT_YEAR = re.compile(r"\b(19|20)\s(\d{2})\b")
 # What the agent says that a customer would not: consent disclosure, script openers and
 # the read-back.
 _AGENT_CUE = re.compile(
-    r"call (is|may be|will be) (being )?recorded|energy recovery|may i help you|"
-    r"pick up where you left off|comparing energy plans|read that back|"
-    r"have i got (all of that|those details) right",
+    r"call (is|may be|will be) (being )?recorded|energy recovery|okay time to continue|"
+    r"continue where you left off|comparing energy plans|check i have this right|"
+    r"is all of that correct",
     re.IGNORECASE,
 )
 _CONSENT = re.compile(
     r"\b(call|conversation)\b.{0,40}\brecord(ed|ing)\b|\brecord(ed|ing)\b.{0,40}\b(call|conversation)\b",
     re.IGNORECASE,
 )
+# The agent repeating a value back ("I have 12 Test Street... Is that correct?") is not a
+# question about that field, so the customer's "yes" after it is not an answer to it.
 _READBACK = re.compile(
-    r"read that back|have i got (all|those)|service address:|move-in date:", re.IGNORECASE
+    r"check i have this right|is all of that correct|\bi have\b.{0,200}\bis that (correct|right)\b",
+    re.IGNORECASE | re.DOTALL,
 )
 
 # The topic of an agent question, in priority order when a line mentions several.
@@ -153,7 +156,10 @@ _TOPICS: list[tuple[str, re.Pattern[str]]] = [
         "contact_preference",
         re.compile(r"\b(phone or (by )?email|contact you|by phone|prefer)\b", re.IGNORECASE),
     ),
-    ("move_in_date", re.compile(r"\b(moving in|moving into|move[- ]in|what date)\b", re.IGNORECASE)),
+    (
+        "move_in_date",
+        re.compile(r"\b(moving in|moving into|move[- ]in|connection to begin|what date)\b", re.IGNORECASE),
+    ),
     ("property_address", re.compile(r"\baddress\b", re.IGNORECASE)),
 ]
 
@@ -432,7 +438,7 @@ def process_recording(
     life_support_yes = collected.get("life_support") == "YES"
 
     if stop is not None and stop.is_decline:
-        _decline(session, lead, stop, audit)
+        _decline(session, lead, stop, stop_text, audit)
         result.outcome = SessionStatus.DECLINED.value
         result.notes.append("The customer declined. No journey was submitted.")
     elif stop is not None or life_support_yes:
@@ -595,7 +601,7 @@ def _queue_for_recovery(session: CallSession, lead: Lead, missing: list[str], au
     )
 
 
-def _decline(session: CallSession, lead: Lead, verdict, audit) -> None:
+def _decline(session: CallSession, lead: Lead, verdict, text: str, audit) -> None:
     session.status = SessionStatus.DECLINED.value
     session.state = "DECLINED"
     session.outcome_detail = "CUSTOMER_DECLINED"
@@ -604,6 +610,16 @@ def _decline(session: CallSession, lead: Lead, verdict, audit) -> None:
         "CALL_DECLINED",
         f"matched='{verdict.matched}' — refusal respected; no journey submitted, no retry.",
     )
+    if safety_engine.is_do_not_call_request(text):
+        # Same rule as a live call: an explicit "stop calling me" flags the lead for good.
+        session.outcome_detail = "DO_NOT_CALL_REQUESTED"
+        lead.dnc_status = True
+        audit("DNC_REQUEST_LOGGED", "Customer asked not to be contacted again.")
+        audit(
+            "DNC_REGISTER_UPDATED",
+            f"Lead {lead.id} flagged Do-Not-Call at the customer's request. "
+            "Future dialling is blocked and cannot be overridden.",
+        )
 
 
 def _handoff(

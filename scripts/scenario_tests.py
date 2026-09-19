@@ -55,6 +55,10 @@ class Call:
         return self.session["status"]
 
     @property
+    def state(self) -> str:
+        return self.session["state"]
+
+    @property
     def agent_said(self) -> str:
         return " ".join(self.agent_messages)
 
@@ -65,8 +69,11 @@ class Call:
         """
         replies = {"recording_consent": CONSENT, **answers}
         guard = 0
-        while self.step != step and self.status == "ACTIVE" and guard < 10:
+        while self.step != step and self.status == "ACTIVE" and guard < 20:
             guard += 1
+            if self.state == "CONFIRMING_FIELD":  # address, date and energy are read back
+                self.say(CONFIRM)
+                continue
             reply = replies.get(self.step)
             if reply is None:
                 raise AssertionError(f"No canned reply for step '{self.step}'")
@@ -74,14 +81,18 @@ class Call:
 
 
 CONSENT = "Yes, go ahead."
+CONFIRM = "Yes, that's correct."
 ADDRESS = "12 Test Street, Sydney NSW 2000"
+DATE = "1 October 2030"
 
 
 def scenario_relative_date(client: httpx.Client) -> None:
-    print("\nSCENARIO 1 — ambiguous relative date gets exactly one clarification")
+    print("\nSCENARIO 1 — ambiguous relative date is followed up")
     call = Call(client, "E-1001")
     call.say(CONSENT)
     call.say(ADDRESS)
+    check("address is read back before it counts", call.state == "CONFIRMING_FIELD", call.state)
+    call.say(CONFIRM)
     check("advanced to move_in_date", call.step == "move_in_date", call.step)
 
     turn = call.say("I'm moving in next Friday.")
@@ -97,21 +108,27 @@ def scenario_relative_date(client: httpx.Client) -> None:
     )
     check("field not marked VALID", attempt["status"] != "VALID", attempt["status"])
 
-    call.say("1 October 2026")
-    check("accepted the complete date", call.step == "energy_requirement", call.step)
+    call.say(DATE)
+    check("complete date is read back", call.state == "CONFIRMING_FIELD" and "1 October 2030" in call.agent_said, call.agent_said[:60])
+    call.say(CONFIRM)
+    check("accepted the confirmed date", call.step == "energy_requirement", call.step)
     row = next(f for f in call.session["journey_fields"] if f["field_name"] == "move_in_date")
-    check("stored as ISO date", row["value"] == "2026-10-01", str(row["value"]))
+    check("stored as ISO date", row["value"] == "2030-10-01", str(row["value"]))
 
 
 def scenario_repeated_failure(client: httpx.Client) -> None:
-    print("\nSCENARIO 2 — same field fails twice -> REPEATED_FAILURE handoff")
+    print("\nSCENARIO 2 — same field stays unclear -> three follow-ups, then REPEATED_FAILURE handoff")
     call = Call(client, "E-1001")
     call.say(CONSENT)
     call.say(ADDRESS)
+    call.say(CONFIRM)
     call.say("sometime soon")
-    check("clarification asked once", call.step == "move_in_date", call.step)
+    check("follow-up 1 asked", call.step == "move_in_date" and call.status == "ACTIVE", call.step)
     call.say("whenever works for me")
-    check("handed off", call.status == "HANDOFF_REQUESTED", call.status)
+    call.say("I'm not sure")
+    check("follow-ups 2 and 3 asked, still ACTIVE", call.step == "move_in_date" and call.status == "ACTIVE", call.status)
+    call.say("no idea")
+    check("handed off after the third follow-up fails", call.status == "HANDOFF_REQUESTED", call.status)
     check(
         "reason is REPEATED_FAILURE",
         call.session.get("handoff_reason") == "REPEATED_FAILURE",
@@ -123,18 +140,18 @@ def scenario_repeated_failure(client: httpx.Client) -> None:
         str((call.session.get("handoff") or {}).get("escalation_signal")),
     )
     check(
-        "only two attempts were made",
+        "four attempts were made (the question + 3 follow-ups)",
         next(f for f in call.session["journey_fields"] if f["field_name"] == "move_in_date")[
             "attempts"
         ]
-        == 2,
+        == 4,
     )
 
 
 def scenario_advice(client: httpx.Client) -> None:
     print("\nSCENARIO 3 — advice request -> OFF_SCRIPT, no advice given")
     call = Call(client, "E-1001")
-    call.advance_to("energy_requirement", {"property_address": ADDRESS, "move_in_date": "1 October 2026"})
+    call.advance_to("energy_requirement", {"property_address": ADDRESS, "move_in_date": DATE})
     call.say("Which plan is cheapest for me?")
     check("handed off", call.status == "HANDOFF_REQUESTED", call.status)
     check(
@@ -143,8 +160,8 @@ def scenario_advice(client: httpx.Client) -> None:
         str(call.session.get("handoff_reason")),
     )
     check(
-        "agent refused to advise",
-        "not able to give advice" in call.agent_said.lower(),
+        "agent gave no advice, only the approved handoff line",
+        "connect you with a team member" in call.agent_said.lower(),
         call.agent_said[:80],
     )
     check(
@@ -155,8 +172,8 @@ def scenario_advice(client: httpx.Client) -> None:
 
 def scenario_mid_journey_decline(client: httpx.Client) -> None:
     print("\nSCENARIO 4 — mid-journey refusal -> DECLINED, no pressure loop")
-    call = Call(client, "E-1001")
-    call.advance_to("energy_requirement", {"property_address": ADDRESS, "move_in_date": "1 October 2026"})
+    call = Call(client, "E-1004")  # its own lead: "take me off your list" flags it Do-Not-Call
+    call.advance_to("energy_requirement", {"property_address": ADDRESS, "move_in_date": DATE})
     call.say("Just take me off your list please.")
     check("declined", call.status == "DECLINED", call.status)
     check(
@@ -166,6 +183,11 @@ def scenario_mid_journey_decline(client: httpx.Client) -> None:
     )
     events = [e["event_type"] for e in call.session["audit_events"]]
     check("decline audited", "CALL_DECLINED" in events, ",".join(events[-3:]))
+    check("acknowledged once with the approved line", call.agent_said.startswith("Understood. I will record that request."), call.agent_said[:70])
+    check("'take me off your list' is logged as a do-not-call request", call.session.get("outcome_detail") == "DO_NOT_CALL_REQUESTED", str(call.session.get("outcome_detail")))
+    check("DNC request audited", "DNC_REQUEST_LOGGED" in events)
+    lead = next(i for i in client.get("/leads").json() if i["lead"]["id"] == "E-1004")
+    check("the lead itself is now flagged Do-Not-Call", lead["lead"]["dnc_status"] is True and lead["can_start"] is False)
 
 
 def scenario_off_script_question(client: httpx.Client) -> None:
@@ -191,6 +213,7 @@ def scenario_frustration(client: httpx.Client) -> None:
     call = Call(client, "E-1001")
     call.say(CONSENT)
     call.say(ADDRESS)
+    call.say(CONFIRM)
     call.say("This is the second call today and I already told you this.")
     check("handed off", call.status == "HANDOFF_REQUESTED", call.status)
     check(
@@ -213,7 +236,7 @@ def scenario_card_boundary(client: httpx.Client) -> None:
     call = Call(client, "E-1001")
     call.advance_to(
         "energy_requirement",
-        {"property_address": ADDRESS, "move_in_date": "1 October 2026"},
+        {"property_address": ADDRESS, "move_in_date": DATE},
     )
     call.say("My card is 4111 1111 1111 1111, expiry 05/28.")
     check("handed off as SENSITIVE_TOPIC", call.session.get("handoff_reason") == "SENSITIVE_TOPIC",
@@ -231,21 +254,27 @@ def scenario_card_boundary(client: httpx.Client) -> None:
 
 
 def scenario_busy_callback(client: httpx.Client) -> None:
-    print("\nSCENARIO 8 — busy customer gets exactly one callback offer")
+    print("\nSCENARIO 8 — busy customer is asked once: callback, or continue later")
     call = Call(client, "E-1001")
     call.say("I'm driving, can you call back later?")
+    check("asked the callback question", "callback" in call.agent_said.lower() and call.status == "ACTIVE", call.agent_said[:80])
+    check("state is AWAITING_BUSY_PREFERENCE", call.state == "AWAITING_BUSY_PREFERENCE", call.state)
+    call.say("A callback please.")
     check("call ended", call.status == "DECLINED", call.status)
     check(
-        "outcome detail is BUSY_CALLBACK_SCHEDULED",
-        call.session.get("outcome_detail") == "BUSY_CALLBACK_SCHEDULED",
+        "outcome detail is CALLBACK_REQUESTED",
+        call.session.get("outcome_detail") == "CALLBACK_REQUESTED",
         str(call.session.get("outcome_detail")),
     )
-    check("exactly one callback offered", call.agent_said.lower().count("callback") == 1,
-          call.agent_said)
-    check(
-        "no field was collected",
-        all(v is None for v in call.session["collected_fields"].values()),
-    )
+    check("exactly one callback question in the whole call", " ".join(
+        s["text"] for s in call.session["transcript"] if s["speaker"] == "AI_AGENT"
+    ).lower().count("would you prefer a callback") == 1)
+    check("no field was collected", all(v is None for v in call.session["collected_fields"].values()))
+
+    later = Call(client, "E-1001")
+    later.say("Not a good time.")
+    later.say("I'll continue later, thanks.")
+    check("'continue later' is logged as LEFT_FOR_LATER", later.session.get("outcome_detail") == "LEFT_FOR_LATER", str(later.session.get("outcome_detail")))
 
 
 async def scenario_websocket(client: httpx.Client, ws_base: str) -> None:
@@ -290,6 +319,9 @@ def main() -> int:
     print("=" * 78)
 
     with httpx.Client(base_url=args.base_url, timeout=30.0) as client:
+        # A stop-calling request flags the lead for good, so start from the seeded state and a
+        # second run of this file behaves like the first.
+        client.post("/demo/reset")
         scenario_relative_date(client)
         scenario_repeated_failure(client)
         scenario_advice(client)

@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.conversation.state_machine import ConversationEngine
+from app.conversation.state_machine import ConversationEngine, JourneyConflict
 from app.database import SessionLocal, get_db
 from app.models import CallSession, Handoff, Lead, Speaker, TranscriptSegment
 from app.schemas import (
@@ -20,6 +20,7 @@ from app.schemas import (
     FieldCaptureRequest,
     HandoffListItem,
     HandoffOut,
+    HandoffSubmitRequest,
     HandoffRequest,
     StartCallRequest,
     StartCallResponse,
@@ -286,6 +287,39 @@ def capture_field(
         result = engine.capture_field_by_human(
             call_session_id, body.field_name, body.value, body.agent_name
         )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _turn_response(db, result)
+
+
+@router.post("/calls/{call_session_id}/handoff/submit", response_model=TurnResponse)
+def submit_handed_off_journey(
+    call_session_id: str,
+    body: HandoffSubmitRequest,
+    db: Session = Depends(get_db),
+) -> TurnResponse:
+    """A human agent completes a call that was handed to them.
+
+    Fill the remaining fields with `POST /calls/{id}/field` (same validators as a spoken
+    answer), read everything back to the customer, then submit here with
+    `customer_confirmed: true`. When life support is YES the agent must also validate it
+    with the customer (`life_support_validated: true`); the AI itself never submits that.
+    422 when something is missing, invalid or unvalidated, 409 when the call is not waiting
+    on a human or was already submitted.
+    """
+    _load_session(db, call_session_id)
+    engine = ConversationEngine(db)
+    try:
+        result = engine.submit_by_human(
+            call_session_id,
+            body.agent_name,
+            body.customer_confirmed,
+            body.life_support_validated,
+        )
+    except JourneyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

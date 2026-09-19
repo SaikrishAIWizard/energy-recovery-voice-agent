@@ -105,35 +105,65 @@ def _is_vague(text: str) -> bool:
 # address
 # --------------------------------------------------------------------------- #
 
-_STREET_HINTS = re.compile(
-    r"\b(street|st|road|rd|avenue|ave|av|drive|dr|close|court|ct|crescent|cres|"
-    r"place|pl|lane|ln|way|parade|pde|terrace|tce|highway|hwy|boulevard|blvd|"
-    r"circuit|cct|grove|rise|walk|unit|apartment|apt|flat|suite|level|"
-    r"nsw|vic|qld|wa|sa|tas|act|nt)\b",
+_STREET_TYPES = (
+    r"street|st|road|rd|avenue|ave|av|drive|dr|close|court|ct|crescent|cres|place|pl|lane|ln|"
+    r"way|parade|pde|terrace|tce|highway|hwy|boulevard|blvd|circuit|cct|grove|rise|walk"
+)
+# House number, then the street name (1-4 words), then the street type: "12 Test Street".
+# A leading unit ("Unit 4,") is skipped because the name must be words, not another number.
+_STREET = re.compile(
+    rf"\b(?P<num>\d{{1,4}}[a-z]?(?:\s*-\s*\d{{1,4}})?)\s*,?\s+"
+    rf"(?P<name>[a-z][a-z'.\-]*(?:\s+[a-z][a-z'.\-]*){{0,3}}?)\s+(?P<type>{_STREET_TYPES})\b",
     re.IGNORECASE,
 )
+_STATE_FULL = re.compile(
+    r"\b(new south wales|victoria|queensland|western australia|south australia|tasmania|"
+    r"australian capital territory|northern territory)\b",
+    re.IGNORECASE,
+)
+_STATE_ABBR = re.compile(r"\b(nsw|vic|qld|wa|sa|tas|act|nt)\b", re.IGNORECASE)
 _AU_POSTCODE = re.compile(r"\b\d{4}\b")
 
 
 def validate_address(raw: str) -> ValidationResult:
+    """A service address needs a street number, a street name and type, and a suburb, plus
+    the state and/or postcode (the checklist asks for both; one of the two is enough to
+    proceed because the customer hears the whole address read back and confirms it).
+
+    Anything less ("Queens Street", "12 Test Street") is asked for again, once.
+    """
     text = _clean(raw)
     if not text:
         return ValidationResult.invalid("empty_address", 0.0)
     if _is_vague(text):
         return ValidationResult.invalid("not_an_address", 0.15)
 
-    has_digit = bool(re.search(r"\d", text))
-    has_street = bool(_STREET_HINTS.search(text))
-    token_count = len(re.findall(r"[A-Za-z]{2,}", text))
+    street = _STREET.search(text)
+    if street is None:
+        has_digit = bool(re.search(r"\d", text))
+        return ValidationResult.invalid(
+            "address_missing_street_number_or_name" if has_digit else "address_lacks_street_or_number",
+            0.3,
+        )
 
-    if len(text) < 6 or token_count < 1:
-        return ValidationResult.invalid("address_too_short", 0.2)
-    if not has_digit and not has_street:
-        return ValidationResult.invalid("address_lacks_street_or_number", 0.3)
-    if token_count < 2 and not _AU_POSTCODE.search(text):
-        return ValidationResult.invalid("address_incomplete", 0.4)
+    rest = text[street.end():]
+    has_postcode = bool(_AU_POSTCODE.search(rest))
+    has_state = bool(_STATE_FULL.search(rest) or _STATE_ABBR.search(rest))
+    suburb_words = _AU_POSTCODE.sub(" ", _STATE_ABBR.sub(" ", _STATE_FULL.sub(" ", rest)))
+    has_suburb = bool(re.search(r"[A-Za-z]{3,}", suburb_words))
 
-    confidence = 0.95 if (has_digit and has_street) else 0.86
+    missing = [
+        label
+        for label, present in (
+            ("suburb", has_suburb),
+            ("state or postcode", has_state or has_postcode),
+        )
+        if not present
+    ]
+    if missing:
+        return ValidationResult.invalid("address_missing_" + "_and_".join(m.replace(" ", "_") for m in missing), 0.5)
+
+    confidence = 0.95 if (has_state and has_postcode) else 0.86
     return ValidationResult(ok=True, value=text, display=text, confidence=confidence)
 
 
@@ -147,7 +177,7 @@ _DAY_MONTH_YEAR = re.compile(
     rf"\b(\d{{1,2}})\s*(?:of\s+)?({_MONTH_ALT})\.?,?\s*(\d{{4}}|\d{{2}})\b", re.IGNORECASE
 )
 _MONTH_DAY_YEAR = re.compile(
-    rf"\b({_MONTH_ALT})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s*(\d{{4}}|\d{{2}})\b", re.IGNORECASE
+    rf"\b({_MONTH_ALT})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b,?\s*(\d{{4}}|\d{{2}})\b", re.IGNORECASE
 )
 _MONTH_YEAR_ONLY = re.compile(rf"\b({_MONTH_ALT})\.?\s+(\d{{4}})\b", re.IGNORECASE)
 _MONTH_ONLY = re.compile(rf"\b({_MONTH_ALT})\b", re.IGNORECASE)
@@ -215,6 +245,7 @@ def validate_move_in_date(raw: str, today: date | None = None) -> ValidationResu
 # --------------------------------------------------------------------------- #
 
 _ENERGY_BOTH = re.compile(r"\b(both|all of them|two of them|each|and)\b", re.IGNORECASE)
+_BOTH_ONLY = re.compile(r"\b(both|all of them|the two|two of them)\b", re.IGNORECASE)
 _ENERGY_ELEC = re.compile(r"\b(electric|electricity|elec|power|energy)\b", re.IGNORECASE)
 _ENERGY_GAS = re.compile(r"\b(gas|natural gas|lpg)\b", re.IGNORECASE)
 
@@ -243,6 +274,8 @@ def validate_energy_requirement(raw: str) -> ValidationResult:
         return _enum_result("BOTH", "Both")
     if _ENERGY_BOTH.search(text) and (has_e or has_g):
         return _enum_result("BOTH", "Both", 0.9)
+    if _BOTH_ONLY.search(text):
+        return _enum_result("BOTH", "Both", 0.9)  # "both" answers this question by itself
     if has_e:
         return _enum_result("ELECTRICITY", "Electricity")
     if has_g:
@@ -323,6 +356,31 @@ def validate_confirmation(raw: str) -> ValidationResult:
 
 
 # --------------------------------------------------------------------------- #
+# which field is a correction about?
+# --------------------------------------------------------------------------- #
+
+_FIELD_MENTIONS: list[tuple[str, re.Pattern[str]]] = [
+    ("life_support", re.compile(r"life[- ]?support|ventilator|oxygen", re.IGNORECASE)),
+    ("concession_status", re.compile(r"concession|pension|discount", re.IGNORECASE)),
+    ("energy_requirement", re.compile(r"electric|\bgas\b|energy|supply", re.IGNORECASE)),
+    ("contact_preference", re.compile(r"phone|e-?mail|contact", re.IGNORECASE)),
+    ("move_in_date", re.compile(r"\bdate\b|moving|move[- ]?in|connection", re.IGNORECASE)),
+    ("property_address", re.compile(r"address|street|road|suburb|postcode|\bunit\b|property", re.IGNORECASE)),
+]
+
+
+def detect_correction_fields(text: str) -> list[str]:
+    """The journey fields a correction refers to: those named ("the date is wrong") plus
+    any the text supplies a new value for ("no, it's 5 January 2031"). Usually one; if it is
+    several or none the agent asks which detail to correct rather than guessing."""
+    found = [name for name, pattern in _FIELD_MENTIONS if pattern.search(text or "")]
+    for name, check in (("move_in_date", validate_move_in_date), ("property_address", validate_address)):
+        if name not in found and check(text or "").ok:
+            found.append(name)
+    return found
+
+
+# --------------------------------------------------------------------------- #
 # dispatch
 # --------------------------------------------------------------------------- #
 
@@ -352,6 +410,7 @@ def humanise_iso_date(value: str | None) -> str:
     if not value:
         return "not provided"
     try:
-        return datetime.fromisoformat(value).strftime("%d %B %Y")
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return value
+    return f"{parsed.day} {parsed:%B %Y}"  # "1 October 2030": spoken aloud, so no leading zero

@@ -46,32 +46,41 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 
 AGENT, CUST = "0", "1"
+# Agent lines are the script's own (docs/energy-agent-script-and-checklist.md), including the
+# per-field read-backs ("I have X. Is that correct?"): the customer's "yes" to one of those
+# must not be mistaken for an answer to the field it mentions.
 OPENING = [
-    (AGENT, "Hi Ava, this is the Energy Recovery Assistant. This call is recorded. May I help you continue?"),
+    (AGENT, "Hi Ava, this is the Energy Recovery Assistant from Energy Compare. You started comparing energy plans with us earlier. This call is recorded. Is now an okay time to continue where you left off?"),
     (CUST, "Yes, go ahead."),
 ]
 ADDRESS = [
-    (AGENT, "Great. What is the service address for the property you're connecting?"),
+    (AGENT, "What is the full service address for the property you are connecting, including unit number if there is one, street number, street name, suburb, state, and postcode?"),
     (CUST, "12 Test Street, Sydney NSW 2000"),
+    (AGENT, "I have 12 Test Street, Sydney NSW 2000. Is that correct?"),
+    (CUST, "Yes."),
 ]
 MOVE_IN = [
-    (AGENT, "What date are you moving into the property?"),
+    (AGENT, "What date are you moving into the property, or when would you like the energy connection to begin?"),
     (CUST, "1 December 2030."),
+    (AGENT, "I have 1 December 2030. Is that correct?"),
+    (CUST, "Yes."),
 ]
 ENERGY = [
-    (AGENT, "Will you need electricity, gas, or both at the property?"),
+    (AGENT, "Will you need electricity, gas, or both at this property?"),
     (CUST, "Electricity and gas please."),
+    (AGENT, "I have Electricity and gas. Is that right?"),
+    (CUST, "Yes."),
 ]
 CONCESSION = [
-    (AGENT, "Do you have an eligible concession card that should be applied to the account?"),
+    (AGENT, "Do you have an eligible concession card you would like noted for the account? You can answer yes, no, or not sure."),
     (CUST, "No."),
 ]
 LIFE_SUPPORT_NO = [
-    (AGENT, "Does anyone at the property use life-support equipment that needs a continuous power supply?"),
+    (AGENT, "Does anyone at the property use life-support equipment that needs a continuous electricity supply?"),
     (CUST, "No."),
 ]
 CONTACT = [
-    (AGENT, "And would you prefer we contact you by phone or by email?"),
+    (AGENT, "For the next update, would you prefer we contact you by phone or email?"),
     (CUST, "Email is best."),
 ]
 
@@ -175,10 +184,12 @@ def main() -> int:
         check("outcome DECLINED", body["outcome"] == "DECLINED", body["outcome"])
         check("no submission", body["session"]["submission"] is None)
         check("lead DECLINED", queue_item(client, "E-1007")["lead"]["status"] == "DECLINED")
+        check("'stop calling me' in a recording flags the lead Do-Not-Call too", queue_item(client, "E-1007")["lead"]["dnc_status"] is True and body["session"]["outcome_detail"] == "DO_NOT_CALL_REQUESTED", str(body["session"]["outcome_detail"]))
+        check("...so a recovery call for that lead is refused", client.post("/calls/start/E-1007", json={}).json()["blocked"] is True)
 
         print("\n6. Life support declared -> human handoff, never submitted")
         life_yes = [
-            (AGENT, "Does anyone at the property use life-support equipment that needs a continuous power supply?"),
+            (AGENT, "Does anyone at the property use life-support equipment that needs a continuous electricity supply?"),
             (CUST, "Yes, my husband uses an oxygen concentrator."),
         ]
         r = upload(client, recording(OPENING, ADDRESS, MOVE_IN, ENERGY, CONCESSION, life_yes, CONTACT), lead_id="E-1002")
@@ -232,10 +243,10 @@ def main() -> int:
         print("\n11. Real-STT quirks: split year, and a one-word reply tagged as the agent")
         quirky = recording(
             OPENING, ADDRESS,
-            [(AGENT, "What date are you moving into the property?"), (CUST, "The 1st of December 20 30.")],
+            [(AGENT, "What date are you moving into the property, or when would you like the energy connection to begin?"), (CUST, "The 1st of December 20 30."), (AGENT, "I have 1 December 2030. Is that correct?"), (CUST, "Yes.")],
             ENERGY, CONCESSION,
             [
-                (AGENT, "Does anyone at the property use life-support equipment that needs a continuous power supply?"),
+                (AGENT, "Does anyone at the property use life-support equipment that needs a continuous electricity supply?"),
                 (AGENT, "No."),  # diarization slip: the customer's reply, labelled as the agent
             ],
             CONTACT,
@@ -250,7 +261,7 @@ def main() -> int:
         print("\n12. An agent asking twice is not read as answering itself")
         two_questions = recording(
             OPENING,
-            [(AGENT, "What date are you moving into the property?"), (AGENT, "Is that soon?")],
+            [(AGENT, "What date are you moving into the property, or when would you like the energy connection to begin?"), (AGENT, "Is that soon?")],
         )
         r = upload(client, two_questions, lead_id="E-1007")
         check("no field invented from agent-only speech", "move_in_date" in r.json()["missing_fields"])

@@ -79,6 +79,11 @@ class HandoffOut(BaseModel):
     escalation_signal: str | None = None
     lead_id: str | None = None
     known_contact: dict[str, Any] = Field(default_factory=dict)
+    # The rest of the warm-handoff package: what is still needed, how sure we are of each
+    # captured value and where it came from, and that the recording was disclosed.
+    outstanding_fields: list[str] = Field(default_factory=list)
+    field_details: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    recording_disclosed: bool = False
 
 
 class SubmissionOut(BaseModel):
@@ -183,6 +188,23 @@ class FieldCaptureRequest(BaseModel):
     ]
     value: str = Field(min_length=1, max_length=400)
     agent_name: str = Field(default="Human Agent", min_length=1, max_length=120)
+
+
+class HandoffSubmitRequest(BaseModel):
+    """A human agent completing a handed-off journey."""
+
+    agent_name: str = Field(default="Human Agent", min_length=1, max_length=120)
+    customer_confirmed: bool = Field(
+        default=False,
+        description="The agent read the details back and the customer confirmed them.",
+    )
+    life_support_validated: bool = Field(
+        default=False,
+        description=(
+            "Required when life support is YES: the agent confirmed it with the customer and is "
+            "handling this as a vulnerable-customer case. Ignored otherwise."
+        ),
+    )
 
 
 class EndCallRequest(BaseModel):

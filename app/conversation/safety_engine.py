@@ -221,7 +221,6 @@ class SafetyVerdict:
     # Audit-safe fingerprint of any card seen (length + last 4 + Luhn validity only —
     # never the number itself). Recorded so a reviewer can confirm the boundary held.
     card_fingerprint: str | None = None
-    agent_messages: list[str] = field(default_factory=list)
 
     @property
     def is_handoff(self) -> bool:
@@ -354,10 +353,6 @@ def evaluate(utterance: str) -> SafetyVerdict:
         verdict.escalation_signal = "OFF_SCRIPT"
         verdict.matched = advice
         verdict.note = "Customer asked for product or financial advice. Not in scope."
-        verdict.agent_messages = [
-            "I can collect the details for you, but I'm not able to give advice about "
-            "plans or pricing. Let me put you through to a specialist who can help.",
-        ]
         return verdict
 
     # 7. Clearly off-script topic.
@@ -367,10 +362,6 @@ def evaluate(utterance: str) -> SafetyVerdict:
         verdict.escalation_signal = "OFF_SCRIPT"
         verdict.matched = off_topic
         verdict.note = "Customer raised a topic outside the approved Energy script."
-        verdict.agent_messages = [
-            "That's outside what I can help with on this call. Let me pass you to a "
-            "specialist who can look at that with you.",
-        ]
         return verdict
 
     return verdict
@@ -396,15 +387,74 @@ def _handoff(
 # --------------------------------------------------------------------------- #
 
 
+# A bare "no" to "Is now an okay time?" means "not now": the busy branch of the script.
+_BARE_NO = re.compile(r"^\s*(no|nope|nah|not really)\b(?!\s+(worries|problem))[\s.,!]*$", re.IGNORECASE)
+
+
 def classify_gate_intent(utterance: str) -> Literal["CONTINUE", "BUSY", "UNCLEAR"]:
-    """Classify the reply to the consent / continue gate. Decline and handoff are
+    """Classify the reply to "Is now an okay time to continue?". Decline and handoff are
     already handled by `evaluate()` before this is called."""
     text = utterance or ""
-    if _BUSY.search(text):
+    if _BUSY.search(text) or _BARE_NO.search(text):
         return "BUSY"
     if _CONTINUE_YES.search(text):
         return "CONTINUE"
     return "UNCLEAR"
+
+
+# --- "Would you prefer a callback, or should I leave the journey for you?" -------------
+_NO_CALLBACK = re.compile(
+    r"\b(no|not|don'?t|do not|without)\b.{0,20}\bcall ?back\b|\bno need\b|\bleave (it|the journey)\b|"
+    r"\b(i'?ll|i will|let me) (do|finish|continue|complete) (it|that|this)\b|\b(myself|my own|online)\b|"
+    r"\bcontinue (it )?later\b|\bnot needed\b|\bno thanks\b|\bno thank you\b",
+    re.IGNORECASE,
+)
+_CALLBACK = re.compile(
+    r"\bcall ?back\b|\bcall me\b|\bring me\b|\bphone me\b|\bgive me a (call|ring)\b|\bcontact me\b|"
+    r"\btry again\b",
+    re.IGNORECASE,
+)
+
+
+def classify_busy_preference(utterance: str) -> Literal["CALLBACK", "LATER", "UNCLEAR"]:
+    """Reply to the busy-branch question. A refusal to be called back wins over the word
+    "callback" appearing in it ("no callback, thanks")."""
+    text = utterance or ""
+    if _NO_CALLBACK.search(text):
+        return "LATER"
+    if _CALLBACK.search(text):
+        return "CALLBACK"
+    return "UNCLEAR"
+
+
+# --- "Do I qualify for a concession?" — the script offers a person, it never answers -----
+_ELIGIBILITY = re.compile(
+    r"\b(qualify|qualifies|qualified|eligible|eligibility|entitled|entitlement)\b", re.IGNORECASE
+)
+
+
+def is_eligibility_question(utterance: str) -> bool:
+    text = utterance or ""
+    return bool(_ELIGIBILITY.search(text)) and (is_question_like(text) or "?" in text)
+
+
+# --- "stop calling me" is a do-not-call request; "not interested" is only a decline --------
+# This decides whether the lead is permanently flagged Do-Not-Call, so it is deliberately
+# specific: it needs an explicit request to stop, remove or delete, not a stray word like
+# "contact" in "I already have a contact at another provider".
+_DO_NOT_CALL = re.compile(
+    r"\b(stop|quit|cease|don'?t|dont|do not|never|no more)\b.{0,15}"
+    r"\b(call|calls|calling|contact|contacting|ring|ringing|phone|phoning|text|texting|e-?mail|e-?mailing)\b"
+    r"|\b(remove|take)\s+(me|my (number|details|name))\s+(off|out|from)\b"
+    r"|\bdelete my (details|number|data)\b|\bunsubscribe\b|\bopt\s*-?\s*out\b"
+    r"|\b(off|from) (your|the) (call(ing)? )?list\b",
+    re.IGNORECASE,
+)
+
+
+def is_do_not_call_request(utterance: str | None) -> bool:
+    """Judged on the whole reply: the decline pattern that matched may be just "take me off"."""
+    return bool(utterance and _DO_NOT_CALL.search(utterance))
 
 
 def is_meta_question(utterance: str) -> bool:

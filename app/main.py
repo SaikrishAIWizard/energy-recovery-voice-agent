@@ -17,7 +17,7 @@ from app.config import ENV_FILE, MIN_FIELD_CONFIDENCE, settings
 from app.database import SessionLocal, init_db
 from app.models import CallSession, Lead
 from app.routers import calls, dashboard, database_viewer, journey, leads, recordings, twilio
-from app.seed import ensure_seeded
+from app.seed import ensure_seeded, restore_seed_leads
 from app.services.llm_service import llm_status
 from app.services.script_service import script_service
 from app.services.twilio_service import TwilioError
@@ -172,6 +172,8 @@ def demo_reset(clear_calls: bool = True) -> dict:
                 db.delete(session)
             db.commit()
         result = ensure_seeded(db)
+        if clear_calls:
+            result["leads_restored"] = restore_seed_leads(db)
     finally:
         db.close()
     return {"reset": True, "calls_cleared": clear_calls, "leads": result}

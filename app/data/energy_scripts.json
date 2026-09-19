@@ -1,12 +1,17 @@
 {
   "journey_id": "ENERGY_DROPOUT_RECOVERY",
   "vertical": "ENERGY",
-  "version": "1.0.0",
-  "description": "Energy dropped-lead recovery journey. One script section per journey step, one approved prompt per field. The state machine may ONLY speak the `prompt` for the active step, or its `fallback_prompt` as a single clarification. `demo_replies` are console quick-replies for the simulated-customer mode and are never spoken by the agent.",
+  "version": "2.0.0",
+  "source_document": "docs/energy-agent-script-and-checklist.md",
+  "description": "Energy-only dropout-recovery script. This file is the single source of truth for everything the agent is allowed to say; it follows docs/energy-agent-script-and-checklist.md line for line (tests/script_tests.py checks every quoted line of that document against this file). Lines marked `derived` are the smallest possible acknowledgements the document requires but does not word (closing a call, re-asking a question more simply); no other text may be spoken. `demo_replies` and `state_demo_replies` are console quick-replies for the simulated-customer mode and are never spoken by the agent.",
   "conventions": {
-    "max_retries": "Total capture attempts allowed for the field (initial ask + clarifications).",
-    "max_clarifications": "Hard cap on clarification questions. The spec allows exactly one.",
-    "min_confidence": 0.8
+    "max_retries": "Total capture attempts allowed for a field: the question plus three follow-ups (FIELD_FOLLOW_UPS in .env).",
+    "max_clarifications": "Follow-up questions allowed per field before a person takes over: three, each worded more simply than the last.",
+    "min_confidence": 0.8,
+    "one_question_at_a_time": true,
+    "readback_fields": "Address, move-in date and energy are read back to the customer straight after they are captured, and only become valid once confirmed. Everything is read back again at the end.",
+    "placeholders": "Text in {braces} is filled from the lead record or the journey. A missing value renders as 'not provided'; nothing is ever invented.",
+    "brevity": "Keep the agent's lines short and generic. Follow-ups escalate: a brief re-ask, then the accepted format with a simple example, then the shortest nudge. Long lines are only for the document's own explanations (the opening, the read-backs). When the customer agrees to continue, the agent goes straight to the first missing question, with no lead-in."
   },
   "resume_order": [
     "recording_consent",
@@ -40,156 +45,292 @@
       "step_id": "recording_consent",
       "field_name": "recording_consent",
       "kind": "DISCLOSURE",
-      "prompt": "Hi {first_name}, this is the Energy Recovery Assistant. This call is recorded. You started comparing energy plans with us earlier. May I help you continue?",
-      "fallback_prompt": "Sorry, I didn't catch that. Would you like me to continue helping with your energy comparison?",
+      "section": "1. Opening, recording disclosure, and permission",
+      "prompt": "Hi {first_name}, this is the Energy Recovery Assistant from {brand}. You started comparing energy plans with us earlier. This call is recorded. Is now an okay time to continue where you left off?",
+      "fallback_prompt": "Sorry, I didn't catch that. Is now a good time to continue?",
+      "fallback_source": "derived, kept short: follow-up 1 is a brief generic re-ask (for the date, the document's own wording); follow-up 2 states the accepted format with a simple example; follow-up 3 is the shortest nudge",
       "validation_type": "consent",
       "required": false,
-      "max_retries": 2,
-      "max_clarifications": 1,
+      "max_retries": 4,
+      "max_clarifications": 3,
       "next_step": "customer_continue",
       "demo_replies": [
         "Yes, go ahead.",
         "I'm a bit busy right now.",
         "Not interested, thanks.",
         "Can you put me through to a person?"
+      ],
+      "fallback_prompts": [
+        "Sorry, I didn't catch that. Is now a good time to continue?",
+        "Please answer yes or no. For example, say \"yes\" if now is fine, or \"no\" if it isn't.",
+        "Just yes or no, please."
       ]
     },
     {
       "step_id": "customer_continue",
       "field_name": "continue_intent",
-      "kind": "GATE",
-      "prompt": "Would you like to pick up where you left off?",
-      "fallback_prompt": "Sorry, I didn't catch that. Would you like to continue with your energy comparison?",
+      "kind": "MILESTONE",
+      "section": "Journey milestone only. The customer's permission is asked once, in the opening; this step exists so a lead's last completed journey step can be mapped, and it is never spoken.",
       "validation_type": "continue_intent",
       "required": false,
-      "max_retries": 2,
-      "max_clarifications": 1,
-      "next_step": "property_address",
-      "demo_replies": [
-        "Yes, let's continue.",
-        "I'm busy, can you call back later?",
-        "Please take me off your list.",
-        "I want to talk to a human."
-      ]
+      "next_step": "property_address"
     },
     {
       "step_id": "property_address",
       "field_name": "property_address",
       "kind": "FIELD",
-      "prompt": "Great. What is the service address for the property you're connecting?",
-      "fallback_prompt": "Sorry, I missed that. Could you say the full service address again, including the street number and suburb?",
+      "section": "3. Service address",
+      "prompt": "What is the full service address for the property you are connecting, including unit number if there is one, street number, street name, suburb, state, and postcode?",
+      "fallback_prompt": "Sorry, I missed that. Could you say the full address again?",
+      "fallback_source": "derived, kept short: follow-up 1 is a brief generic re-ask (for the date, the document's own wording); follow-up 2 states the accepted format with a simple example; follow-up 3 is the shortest nudge",
+      "readback_prompt": "I have {property_address}. Is that correct?",
       "validation_type": "address",
       "required": true,
-      "max_retries": 2,
-      "max_clarifications": 1,
+      "max_retries": 4,
+      "max_clarifications": 3,
       "next_step": "move_in_date",
       "demo_replies": [
         "12 Test Street, Sydney NSW 2000",
-        "Unit 4, 88 Sample Road, Parramatta NSW 2150"
+        "Unit 4, 88 Sample Road, Parramatta NSW 2150",
+        "Just Queens Street"
+      ],
+      "fallback_prompts": [
+        "Sorry, I missed that. Could you say the full address again?",
+        "Please say it in this format: unit (if any), street number, street name, suburb, state, postcode. For example: 12 Test Street, Sydney NSW 2000.",
+        "One more try, like this: 12 Test Street, Sydney NSW 2000."
       ]
     },
     {
       "step_id": "move_in_date",
       "field_name": "move_in_date",
       "kind": "FIELD",
-      "prompt": "What date are you moving into the property?",
-      "fallback_prompt": "Could you please say the move-in date again, including day, month, and year?",
+      "section": "4. Move-in / connection date",
+      "prompt": "What date are you moving into the property, or when would you like the energy connection to begin?",
+      "fallback_prompt": "To make sure I record it correctly, could you give the day, month, and year?",
+      "readback_prompt": "I have {move_in_date}. Is that correct?",
       "validation_type": "date",
       "required": true,
-      "max_retries": 2,
-      "max_clarifications": 1,
+      "max_retries": 4,
+      "max_clarifications": 3,
       "next_step": "energy_requirement",
       "demo_replies": [
-        "1 October 2026",
+        "1 October 2030",
         "Next Friday",
-        "2026-10-01",
+        "2030-10-01",
         "Sometime in October"
-      ]
+      ],
+      "fallback_prompts": [
+        "To make sure I record it correctly, could you give the day, month, and year?",
+        "Please give a date from today onwards, as day, month and year. For example: 1 October 2030.",
+        "One more try, like this: 1 October 2030."
+      ],
+      "fallback_source": "derived, kept short: follow-up 1 is a brief generic re-ask (for the date, the document's own wording); follow-up 2 states the accepted format with a simple example; follow-up 3 is the shortest nudge"
     },
     {
       "step_id": "energy_requirement",
       "field_name": "energy_requirement",
       "kind": "FIELD",
-      "prompt": "Will you need electricity, gas, or both at the property?",
-      "fallback_prompt": "Sorry, just to be sure — is that electricity, gas, or both?",
+      "section": "5. Energy required",
+      "prompt": "Will you need electricity, gas, or both at this property?",
+      "fallback_prompt": "Sorry, was that electricity, gas, or both?",
+      "fallback_source": "derived, kept short: follow-up 1 is a brief generic re-ask (for the date, the document's own wording); follow-up 2 states the accepted format with a simple example; follow-up 3 is the shortest nudge",
+      "readback_prompt": "I have {energy_requirement}. Is that right?",
       "validation_type": "energy_requirement",
       "required": true,
-      "max_retries": 2,
-      "max_clarifications": 1,
+      "max_retries": 4,
+      "max_clarifications": 3,
       "next_step": "concession_status",
       "demo_replies": [
         "Electricity only.",
         "Both electricity and gas.",
+        "Both.",
         "Just gas please."
+      ],
+      "fallback_prompts": [
+        "Sorry, was that electricity, gas, or both?",
+        "Please say just one of these: electricity, gas, or both. For example, say \"both\" if you need both.",
+        "Just say electricity, gas, or both."
       ]
     },
     {
       "step_id": "concession_status",
       "field_name": "concession_status",
       "kind": "FIELD",
-      "prompt": "Do you have an eligible concession card that should be applied to the account?",
-      "fallback_prompt": "Sorry — is that a yes, a no, or are you not sure?",
+      "section": "6. Concession status",
+      "prompt": "Do you have an eligible concession card you would like noted for the account? You can answer yes, no, or not sure.",
+      "fallback_prompt": "Sorry, is that a yes, a no, or not sure?",
+      "fallback_source": "derived, kept short: follow-up 1 is a brief generic re-ask (for the date, the document's own wording); follow-up 2 states the accepted format with a simple example; follow-up 3 is the shortest nudge",
       "validation_type": "yes_no_unsure",
       "required": true,
-      "max_retries": 2,
-      "max_clarifications": 1,
+      "max_retries": 4,
+      "max_clarifications": 3,
       "next_step": "life_support",
+      "eligibility_question_offer": "eligibility_offer",
       "demo_replies": [
         "No, I don't.",
         "Yes, I have one.",
-        "I'm not sure."
+        "I'm not sure.",
+        "Do I qualify for a concession?"
+      ],
+      "fallback_prompts": [
+        "Sorry, is that a yes, a no, or not sure?",
+        "Please answer yes, no, or not sure. For example, say \"no\" if you don't have a concession card.",
+        "Just yes, no, or not sure, please."
       ]
     },
     {
       "step_id": "life_support",
       "field_name": "life_support",
       "kind": "FIELD",
-      "prompt": "Does anyone at the property use life-support equipment that needs a continuous power supply?",
-      "fallback_prompt": "Sorry — is that a yes or a no for life-support equipment at the property?",
+      "section": "7. Life-support screening",
+      "prompt": "Does anyone at the property use life-support equipment that needs a continuous electricity supply?",
+      "fallback_prompt": "Sorry, is that a yes or a no?",
+      "fallback_source": "derived, kept short: follow-up 1 is a brief generic re-ask (for the date, the document's own wording); follow-up 2 states the accepted format with a simple example; follow-up 3 is the shortest nudge",
       "validation_type": "yes_no",
       "required": true,
-      "max_retries": 2,
-      "max_clarifications": 1,
+      "max_retries": 4,
+      "max_clarifications": 3,
       "next_step": "contact_preference",
       "handoff_on_yes": "SENSITIVE_TOPIC",
+      "handoff_message_on_yes": "handoff_life_support",
       "demo_replies": [
         "No.",
         "Yes, my father uses a ventilator."
+      ],
+      "fallback_prompts": [
+        "Sorry, is that a yes or a no?",
+        "Please answer with just yes or no. For example, say \"no\" if nobody at the property uses life-support equipment.",
+        "Just yes or no, please."
       ]
     },
     {
       "step_id": "contact_preference",
       "field_name": "contact_preference",
       "kind": "FIELD",
-      "prompt": "And would you prefer we contact you by phone or by email?",
-      "fallback_prompt": "Sorry — should we use phone or email to contact you?",
+      "section": "8. Contact preference",
+      "prompt": "For the next update, would you prefer we contact you by phone or email?",
+      "fallback_prompt": "Sorry, would you prefer phone or email?",
+      "fallback_source": "derived, kept short: follow-up 1 is a brief generic re-ask (for the date, the document's own wording); follow-up 2 states the accepted format with a simple example; follow-up 3 is the shortest nudge",
       "validation_type": "contact_preference",
       "required": true,
-      "max_retries": 2,
-      "max_clarifications": 1,
+      "max_retries": 4,
+      "max_clarifications": 3,
       "next_step": "confirmation",
       "demo_replies": [
         "Email please.",
         "Phone is fine.",
         "Either one works."
+      ],
+      "fallback_prompts": [
+        "Sorry, would you prefer phone or email?",
+        "Please say just \"phone\" or \"email\". For example, say \"email\" if you would like updates by email.",
+        "Just phone or email, please."
       ]
     },
     {
       "step_id": "confirmation",
       "field_name": "confirmation",
       "kind": "CONFIRMATION",
-      "prompt": "Let me read that back. Service address: {property_address}. Move-in date: {move_in_date}. Supply needed: {energy_requirement}. Concession: {concession_status}. Life support: {life_support}. Contact preference: {contact_preference}. Have I got all of that right?",
-      "fallback_prompt": "Have I got those details right?",
+      "section": "9. Read-back and confirmation",
+      "prompt": "Let me check I have this right: the service address is {property_address}; connection date is {move_in_date}; you need {energy_requirement}; concession status is {concession_status}; life-support status is {life_support}; and your contact preference is {contact_preference}. Is all of that correct?",
+      "fallback_prompt": "Sorry, is all of that correct?",
+      "fallback_source": "derived, kept short: follow-up 1 is a brief generic re-ask (for the date, the document's own wording); follow-up 2 states the accepted format with a simple example; follow-up 3 is the shortest nudge",
       "validation_type": "confirmation",
       "required": true,
-      "max_retries": 1,
-      "max_clarifications": 0,
+      "max_retries": 4,
+      "max_clarifications": 3,
       "next_step": "SUBMIT",
-      "no_retry_policy": "If the customer does not confirm, route to a human. Never loop corrections.",
+      "no_retry_policy": "A correction changes only the field the customer names, then the read-back is repeated once. If it is still not confirmed, a human takes over. Never loop.",
       "demo_replies": [
         "Yes, that's all correct.",
+        "No, the date is wrong.",
         "No, that's not right."
+      ],
+      "fallback_prompts": [
+        "Sorry, is all of that correct?",
+        "Please say \"yes\" if everything is right, or \"no\" and the detail to change. For example: \"no, the date is wrong\".",
+        "Just yes or no, please."
       ]
     }
-  ]
+  ],
+  "messages": {
+    "busy_callback_question": {
+      "section": "1. Opening, recording disclosure, and permission (if busy)",
+      "text": "No problem. Would you prefer a callback, or should I leave the journey for you to continue later?"
+    },
+    "busy_callback_question_again": {
+      "section": "derived: the busy question, asked once more",
+      "text": "Sorry, would you like a callback, or shall I leave it for later?"
+    },
+    "busy_callback_closing": {
+      "section": "derived: acknowledge once and end",
+      "text": "No problem, I have noted a callback. Thank you for your time. Goodbye."
+    },
+    "busy_later_closing": {
+      "section": "derived: acknowledge once and end",
+      "text": "No problem, I will leave it for you to continue later. Thank you for your time. Goodbye."
+    },
+    "decline_closing": {
+      "section": "1. Opening, recording disclosure, and permission (if they decline or ask not to be called)",
+      "text": "Understood. I will record that request. Thank you for your time. Goodbye."
+    },
+    "handoff_human_request": {
+      "section": "1. Opening, recording disclosure, and permission (if they ask for a person)",
+      "text": "Of course. I will connect you with a team member and pass along what we have so you do not need to repeat yourself."
+    },
+    "handoff_default": {
+      "section": "derived: any other warm transfer (frustration, repeated failure, low confidence, off-script or advice question, payment, dispute or vulnerability)",
+      "text": "I will connect you with a team member now and pass along what we have."
+    },
+    "handoff_life_support": {
+      "section": "7. Life-support screening (if yes)",
+      "text": "Thank you for letting me know. I will connect you with a specialist team member so this is handled appropriately. You will not need to repeat the details you have already given."
+    },
+    "eligibility_offer": {
+      "section": "6. Concession status (if they ask whether they qualify)",
+      "text": "I cannot advise on eligibility, but a team member can help. Would you like me to connect you now?"
+    },
+    "correction_prompt": {
+      "section": "derived: which single detail to correct",
+      "text": "Which detail would you like me to correct?"
+    },
+    "submitted_closing": {
+      "section": "9. Read-back and confirmation (if confirmed)",
+      "text": "Thank you. I have submitted these details for the comparison journey. Your next steps will be sent by your preferred contact method. Is there anything else you need from a team member?"
+    },
+    "goodbye": {
+      "section": "derived: end of a finished or ended call",
+      "text": "Thank you for your time. Goodbye."
+    }
+  },
+  "state_demo_replies": {
+    "CONFIRMING_FIELD": [
+      "Yes, that's correct.",
+      "No, that's not right."
+    ],
+    "CONFIRMING_DETAILS": [
+      "Yes, that's all correct.",
+      "No, the date is wrong.",
+      "No, that's not right."
+    ],
+    "AWAITING_BUSY_PREFERENCE": [
+      "A callback please.",
+      "I'll continue later, thanks."
+    ],
+    "AWAITING_ELIGIBILITY_CHOICE": [
+      "Yes, connect me.",
+      "No, I'll just answer."
+    ],
+    "CLOSING": [
+      "No, that's everything, thanks.",
+      "Yes, I'd like to speak to someone."
+    ]
+  },
+  "state_scripted_replies": {
+    "CONFIRMING_FIELD": "Yes, that's correct.",
+    "CONFIRMING_DETAILS": "Yes, that's all correct.",
+    "AWAITING_BUSY_PREFERENCE": "A callback please.",
+    "AWAITING_ELIGIBILITY_CHOICE": "Yes, connect me.",
+    "CLOSING": "No, that's everything, thanks."
+  }
 }

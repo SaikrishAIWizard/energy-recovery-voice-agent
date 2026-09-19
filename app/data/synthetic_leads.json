@@ -13,11 +13,11 @@
       "vertical": "ENERGY",
       "preexisting_fields": {},
       "expected_outcome": "COMPLETED",
-      "scenario_notes": "Happy path. Agrees to continue, gives clean answers for every field, confirms the read-back. Journey submits.",
+      "scenario_notes": "Happy path. Agrees to continue, gives a clean answer for every field and confirms each read-back (address, date, energy) and the final one. Journey submits, then declines a person at the closing question.",
       "scripted_turns": {
         "recording_consent": "Yes, go ahead.",
         "property_address": "12 Test Street, Sydney NSW 2000",
-        "move_in_date": "1 October 2026",
+        "move_in_date": "1 October 2030",
         "energy_requirement": "Electricity only.",
         "concession_status": "No, I don't.",
         "life_support": "No.",
@@ -72,7 +72,7 @@
       "vertical": "ENERGY",
       "preexisting_fields": {},
       "expected_outcome": "DECLINED",
-      "scenario_notes": "Explicit refusal. Thanked once, logged, call ends. No pressure loop, no re-ask, no retry.",
+      "scenario_notes": "Asks not to be called again. Acknowledged once ('I will record that request'), logged as DO_NOT_CALL_REQUESTED, call ends. No pressure loop, no re-ask, no retry.",
       "scripted_turns": {
         "recording_consent": "Stop calling me. I'm not interested."
       }
@@ -94,7 +94,7 @@
       "scenario_notes": "Vulnerable-customer case. Life-support equipment at the property forces an immediate SENSITIVE_TOPIC handoff. The agent must not advise.",
       "scripted_turns": {
         "recording_consent": "Yes, that's fine.",
-        "move_in_date": "15 November 2026",
+        "move_in_date": "15 November 2030",
         "energy_requirement": "Both, electricity and gas.",
         "concession_status": "Yes, I have one.",
         "life_support": "Yes, my father is on a ventilator at home."
@@ -116,7 +116,7 @@
       "scripted_turns": {
         "recording_consent": "Sure.",
         "property_address": "5 Demo Avenue, Newcastle NSW 2300",
-        "move_in_date": "3 December 2026",
+        "move_in_date": "3 December 2030",
         "energy_requirement": "Gas only.",
         "concession_status": "No.",
         "life_support": "No.",
@@ -135,11 +135,11 @@
       "vertical": "ENERGY",
       "preexisting_fields": {},
       "expected_outcome": "DECLINED",
-      "scenario_notes": "Busy-but-not-refusing. The agent offers exactly one later callback option, confirms the slot, then ends politely. Never a second offer.",
+      "scenario_notes": "Busy-but-not-refusing. The agent asks exactly once whether they want a callback or would rather continue later, logs the answer (CALLBACK_REQUESTED / LEFT_FOR_LATER) and ends politely. Never a second offer.",
       "scripted_turns": {
         "recording_consent": "Now's not great."
       }
     }
   ],
-  "scripted_turn_note": "Keyed by the journey step the customer is answering. The recording-consent prompt and the continue question are a single agent turn, so the customer's first reply is keyed 'recording_consent'."
+  "scripted_turn_note": "Keyed by the journey step the customer is answering. The opening (recording disclosure and 'is now an okay time?') is a single agent turn, so the customer's first reply is keyed 'recording_consent'. Yes/no moments (a read-back, the busy question, the closing question) are keyed 'state:<STATE>' in energy_scripts.json and merged in by the API, so a lead only lists what is specific to them."
 }

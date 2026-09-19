@@ -22,9 +22,6 @@ _logger = logging.getLogger(__name__)
 # stop guessing and hand the customer to a human (handoff reason LOW_CONFIDENCE).
 MIN_FIELD_CONFIDENCE = 0.80
 
-# How many times we will attempt to capture one field in total (initial ask + 1
-# clarification). The spec caps clarification at exactly one question, so this is 2.
-MAX_FIELD_ATTEMPTS = 2
 
 # Default endpoint + model for the optional LLM adapter. Both are overridable, because the
 # adapter speaks the OpenAI Chat Completions wire format — which means a free-tier provider
@@ -72,6 +69,20 @@ def _env(name: str) -> str | None:
 def _env_default_on(name: str) -> bool:
     """True unless the variable is explicitly switched off."""
     return os.getenv(name, "").strip().lower() not in {"0", "false", "no", "off"}
+
+
+# When a customer's answer is unclear the agent asks a follow-up, up to this many times, and
+# only then hands over to a person: the question itself plus this many follow-ups. Set
+# FIELD_FOLLOW_UPS in backend/.env to change it. The script file holds three progressively
+# simpler follow-up wordings per question; a larger number reuses the last one.
+def _follow_ups() -> int:
+    raw = os.getenv("FIELD_FOLLOW_UPS", "").strip()
+    return max(1, int(raw)) if raw.isdigit() else 3
+
+
+MAX_FOLLOW_UPS = _follow_ups()
+# Total attempts to capture one field: the question + its follow-ups.
+MAX_FIELD_ATTEMPTS = 1 + MAX_FOLLOW_UPS
 
 
 def _first_env(*names: str) -> str | None:
@@ -148,6 +159,10 @@ class Settings:
     twilio_validate_signature: bool = field(
         default_factory=lambda: _env_default_on("TWILIO_VALIDATE_SIGNATURE")
     )
+    # The company name the opening line introduces the assistant "from". A placeholder for
+    # the demo: set AGENT_BRAND_NAME in backend/.env to the real brand.
+    agent_brand_name: str = field(default_factory=lambda: _env("AGENT_BRAND_NAME") or "Energy Compare")
+
     # When the human agent is busy or does not answer, the customer stays on hold and the
     # agent is rung again: this many rings in total, each with this many seconds of hold.
     handoff_retry_attempts: int = field(

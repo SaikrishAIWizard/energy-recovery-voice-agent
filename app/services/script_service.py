@@ -13,7 +13,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from app.config import DATA_DIR
+from app.config import DATA_DIR, settings
 from app.conversation.validators import humanise_iso_date
 
 SCRIPTS_PATH = DATA_DIR / "energy_scripts.json"
@@ -117,6 +117,56 @@ class ScriptService:
         step = self.step(step_id)
         return list(step.get("demo_replies", [])) if step else []
 
+    def demo_replies_for(self, state: str, step_id: str) -> list[str]:
+        """Quick replies for the console: state-specific when the agent is waiting on a
+        yes/no (a read-back, the busy question...), otherwise the active step's."""
+        by_state = self.raw.get("state_demo_replies", {})
+        if state in by_state:
+            return list(by_state[state])
+        return self.demo_replies(step_id)
+
+    def scripted_state_replies(self) -> dict[str, str]:
+        return dict(self.raw.get("state_scripted_replies", {}))
+
+    # -- named lines ------------------------------------------------------- #
+    def message(self, name: str, **context: Any) -> str:
+        """An APPROVED non-step line (closing, handoff, busy question...). Every line the
+        agent speaks is in the script file; there are no strings hidden in code."""
+        entry = self.raw.get("messages", {}).get(name)
+        if entry is None:
+            raise KeyError(f"No script message '{name}'")
+        return self._render(entry["text"], self._with_defaults(context))
+
+    def handoff_message(self, reason: str, *, life_support: bool = False) -> str:
+        """What the customer hears as they are handed to a person."""
+        if life_support:
+            return self.message("handoff_life_support")
+        if reason == "CUSTOMER_REQUEST":
+            return self.message("handoff_human_request")
+        return self.message("handoff_default")
+
+    def readback_prompt(self, step_id: str, **context: Any) -> str | None:
+        """The per-field read-back ("I have X. Is that correct?"), for steps that have one."""
+        step = self.step(step_id)
+        if not step or not step.get("readback_prompt"):
+            return None
+        return self._render(step["readback_prompt"], self._with_defaults(context))
+
+    def spoken_templates(self) -> list[str]:
+        """Every line the agent can say, unrendered. Used by the tests to prove that nothing
+        outside this file is ever spoken."""
+        lines: list[str] = []
+        for step in self.steps():
+            for key in ("prompt", "fallback_prompt", "readback_prompt"):
+                if step.get(key):
+                    lines.append(step[key])
+            lines.extend(step.get("fallback_prompts", []))
+        lines.extend(entry["text"] for entry in self.raw.get("messages", {}).values())
+        return lines
+
+    def _with_defaults(self, context: dict[str, Any]) -> dict[str, Any]:
+        return {"brand": settings.agent_brand_name, **context}
+
     # -- rendering --------------------------------------------------------- #
     def render_prompt(self, step_id: str, **context: Any) -> str:
         """Render the APPROVED prompt for a step.
@@ -127,12 +177,20 @@ class ScriptService:
         step = self.step(step_id)
         if step is None:
             raise KeyError(f"No script step '{step_id}'")
-        return self._render(step["prompt"], context)
+        if "prompt" not in step:
+            raise KeyError(f"Step '{step_id}' is a journey milestone and is never spoken")
+        return self._render(step["prompt"], self._with_defaults(context))
 
-    def fallback_prompt(self, step_id: str) -> str:
+    def fallback_prompt(self, step_id: str, follow_up: int = 1) -> str:
+        """The follow-up question for a step. `follow_up` is 1 for the first re-ask, 2 for the
+        second...; each is worded more simply than the last, and the final one is reused if
+        the number of follow-ups is raised past what the script provides."""
         step = self.step(step_id)
         if step is None:
             raise KeyError(f"No script step '{step_id}'")
+        ladder = step.get("fallback_prompts")
+        if ladder:
+            return ladder[min(max(follow_up, 1), len(ladder)) - 1]
         return step.get("fallback_prompt") or step["prompt"]
 
     def _render(self, template: str, context: dict[str, Any]) -> str:
@@ -163,8 +221,12 @@ class ScriptService:
         return dict(lead.get("preexisting_fields") or {})
 
     def scripted_turns_for_lead(self, lead_id: str) -> dict[str, str]:
+        """Canned customer replies, by step, for "Play scripted call". Replies for the
+        yes/no moments (read-backs, the closing question...) are keyed `state:<STATE>`."""
         lead = self._lead_overrides().get(lead_id, {})
-        return dict(lead.get("scripted_turns") or {})
+        turns = {f"state:{state}": reply for state, reply in self.scripted_state_replies().items()}
+        turns.update(lead.get("scripted_turns") or {})
+        return turns
 
     def scenario_notes_for_lead(self, lead_id: str) -> str | None:
         lead = self._lead_overrides().get(lead_id, {})

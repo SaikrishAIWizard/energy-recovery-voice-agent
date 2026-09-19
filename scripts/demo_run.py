@@ -62,10 +62,12 @@ def run_lead(client: httpx.Client, lead_id: str, verbose: bool = True) -> dict[s
         print(f"\n  AI AGENT : {textwrap.fill(message, 96, subsequent_indent=' ' * 13)}")
 
     guard = 0
-    while session["status"] == "ACTIVE" and guard < 20:
+    # CLOSING = journey submitted, agent still asking "anything else?".
+    while (session["status"] == "ACTIVE" or session["state"] == "CLOSING") and guard < 30:
         guard += 1
         step = session["current_step"]
-        reply = turns.get(step)
+        # Yes/no moments (read-backs, the busy question...) are keyed by state, the rest by step.
+        reply = turns.get(f"state:{session['state']}") or turns.get(step)
 
         if reply is None:
             # No scripted line for this step: the scenario already ended the call.
@@ -138,7 +140,13 @@ def main() -> int:
             print("Resetting demo data…\n")
             client.post("/demo/reset")
 
-        lead_ids = args.leads or [row["lead"]["id"] for row in client.get("/leads").json()]
+        queue = client.get("/leads").json()
+        for row in queue:
+            # A "stop calling me" flags the lead itself, so it stays blocked until a reset.
+            if row["lead"]["dnc_status"] and row.get("expected_outcome") != "DNC_BLOCKED":
+                print(f"NOTE: {row['lead']['id']} was flagged Do-Not-Call by an earlier stop-calling "
+                      "request, so it will be blocked. Run with --reset to restore it.\n")
+        lead_ids = args.leads or [row["lead"]["id"] for row in queue]
         results = [run_lead(client, lead_id, verbose=not args.quiet) for lead_id in lead_ids]
 
         print("\n" + BAR)
