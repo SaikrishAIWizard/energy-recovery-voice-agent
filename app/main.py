@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from app.config import ENV_FILE, MIN_FIELD_CONFIDENCE, settings
 from app.database import SessionLocal, init_db
 from app.models import CallSession, Lead
-from app.routers import calls, dashboard, database_viewer, journey, leads
+from app.routers import calls, dashboard, database_viewer, journey, leads, recordings
 from app.seed import ensure_seeded
 from app.services.llm_service import llm_status
 from app.services.script_service import script_service
@@ -88,6 +88,7 @@ app.add_middleware(
 
 app.include_router(leads.router)
 app.include_router(calls.router)
+app.include_router(recordings.router)
 app.include_router(journey.router)
 app.include_router(dashboard.router)
 app.include_router(database_viewer.router)

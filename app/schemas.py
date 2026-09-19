@@ -246,6 +246,16 @@ class StartCallResponse(BaseModel):
     system_notes: list[str] = Field(default_factory=list)
 
 
+class RecordingUploadResponse(BaseModel):
+    """Result of analysing an uploaded call recording."""
+
+    session: CallSessionOut
+    outcome: Literal["COMPLETED", "INCOMPLETE", "DECLINED", "HANDOFF_REQUESTED"]
+    missing_fields: list[str] = Field(default_factory=list)
+    stt_provider: str
+    notes: list[str] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # Lead queue
 # --------------------------------------------------------------------------- #

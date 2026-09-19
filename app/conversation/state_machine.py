@@ -47,7 +47,7 @@ from app.models import (
     TranscriptSegment,
     utcnow,
 )
-from app.services import dnc_service, journey_service
+from app.services import dnc_service, journey_service, lead_service
 from app.services.handoff_service import build_context_summary
 from app.services.llm_service import get_llm
 from app.services.script_service import ScriptService, script_service
@@ -60,6 +60,8 @@ TERMINAL_STATES = {
     "DECLINED",
     "HANDOFF_REQUESTED",
     "DNC_BLOCKED",
+    # An analysed recording: there is no live call left to continue.
+    "INCOMPLETE",
 }
 
 FIELD_LABELS = {
@@ -186,6 +188,10 @@ class ConversationEngine:
         if lead is None:
             raise LookupError(f"Unknown lead {lead_id}")
 
+        # Read before the new session exists: the lead's latest session must still be the
+        # previous one, or an earlier recording's captured fields would be invisible.
+        carried = lead_service.carried_fields(self.db, lead.id)
+
         session = CallSession(
             id=f"CS-{lead_id}-{int(datetime.now(timezone.utc).timestamp() * 1000) % 1_000_000:06d}",
             lead_id=lead.id,
@@ -227,9 +233,17 @@ class ConversationEngine:
             )
 
         # -- Seed journey state, then resume from the last completed step. -- #
-        resume_step = self.scripts.resume_step_after(lead.last_completed_step)
+        resume_step = self.scripts.skip_known(
+            self.scripts.resume_step_after(lead.last_completed_step), set(carried)
+        )
         session.resume_step = resume_step
-        self._seed_journey_fields(session, lead)
+        self.seed_journey_fields(session, lead, carried)
+        if carried:
+            self._audit(
+                session.id,
+                "RECORDING_FIELDS_CARRIED",
+                "Already captured from an uploaded recording: " + ", ".join(sorted(carried)),
+            )
         lead.status = LeadStatus.IN_CALL.value
 
         self._audit(
@@ -280,8 +294,16 @@ class ConversationEngine:
             ],
         )
 
-    def _seed_journey_fields(self, session: CallSession, lead: Lead) -> None:
-        preexisting = self.scripts.preexisting_fields_for_lead(lead.id)
+    def seed_journey_fields(
+        self, session: CallSession, lead: Lead, carried: dict[str, Any] | None = None
+    ) -> None:
+        """Seed a session's journey rows: contact details, values already on file, and
+        everything still to collect.
+
+        `carried` holds values captured by an earlier uploaded recording. They are newer
+        than the lead's static on-file data, so they win over it.
+        """
+        preexisting = {**self.scripts.preexisting_fields_for_lead(lead.id), **(carried or {})}
 
         # Contact details already on the lead record.
         for name, value in (("email", lead.email), ("phone", lead.phone)):
@@ -312,7 +334,7 @@ class ConversationEngine:
             if step.get("kind") != "FIELD" and step.get("step_id") != "confirmation":
                 continue
             field_name = step["field_name"]
-            if self._field_row(session.id, field_name):
+            if field_name in preexisting:
                 continue
             self.db.add(
                 JourneyField(

@@ -31,10 +31,16 @@ logger = logging.getLogger(__name__)
 
 
 class STTProvider(Protocol):
+    """`recording=True` means a whole uploaded call rather than one live turn: use the long
+    timeout and, where the vendor supports it, return speaker-labelled `segments`
+    (`[{"speaker", "start", "end", "text", "confidence"}]`, times in seconds)."""
+
     name: str
     available: bool
 
-    def transcribe(self, audio: bytes, mime_type: str = "audio/webm") -> dict[str, Any]: ...
+    def transcribe(
+        self, audio: bytes, mime_type: str = "audio/webm", recording: bool = False
+    ) -> dict[str, Any]: ...
 
 
 class TTSProvider(Protocol):
@@ -65,7 +71,9 @@ class BrowserWebSpeechSTT:
     name: str = "browser_web_speech"
     available: bool = True
 
-    def transcribe(self, audio: bytes, mime_type: str = "audio/webm") -> dict[str, Any]:
+    def transcribe(
+        self, audio: bytes, mime_type: str = "audio/webm", recording: bool = False
+    ) -> dict[str, Any]:
         raise NotImplementedError(
             "Browser Web Speech API transcribes client-side. Post the text to "
             "POST /calls/{id}/utterance with source=BROWSER_SPEECH instead."
@@ -79,7 +87,9 @@ class SimulatedTurnSTT:
     name: str = "simulated_turns"
     available: bool = True
 
-    def transcribe(self, audio: bytes, mime_type: str = "audio/webm") -> dict[str, Any]:
+    def transcribe(
+        self, audio: bytes, mime_type: str = "audio/webm", recording: bool = False
+    ) -> dict[str, Any]:
         raise NotImplementedError("Simulated mode posts text directly; there is no audio.")
 
 
@@ -125,23 +135,52 @@ class DeepgramSTT:
     name: str = "deepgram"
     available: bool = field(init=False, default=True)
 
-    def transcribe(self, audio: bytes, mime_type: str = "audio/webm") -> dict[str, Any]:
+    def transcribe(
+        self, audio: bytes, mime_type: str = "audio/webm", recording: bool = False
+    ) -> dict[str, Any]:
         try:
             import httpx
 
+            query = "model=nova-2&smart_format=true&language=en-AU"
+            if recording:
+                # Not smart_format: it rewrites a spoken date into US-order numerals
+                # ("3rd of April" -> "04/03"), which an Australian reader takes as 4 March.
+                # punctuate+numerals keeps the month as a word. Diarize + utterances give
+                # speaker labels and boundaries, so the caller can tell agent from customer.
+                query = (
+                    "model=nova-2&language=en-AU&punctuate=true&numerals=true"
+                    "&diarize=true&utterances=true"
+                )
             response = httpx.post(
-                "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&language=en-AU",
+                f"https://api.deepgram.com/v1/listen?{query}",
                 headers={
                     "Authorization": f"Token {self.api_key}",
                     "Content-Type": mime_type,
                 },
                 content=audio,
-                timeout=settings.stt_timeout_seconds,
+                timeout=settings.stt_upload_timeout_seconds
+                if recording
+                else settings.stt_timeout_seconds,
             )
             response.raise_for_status()
             body = response.json()
             alt = body["results"]["channels"][0]["alternatives"][0]
-            return {"text": alt.get("transcript", ""), "confidence": alt.get("confidence")}
+            result: dict[str, Any] = {
+                "text": alt.get("transcript", ""),
+                "confidence": alt.get("confidence"),
+            }
+            if recording:
+                result["segments"] = [
+                    {
+                        "speaker": u.get("speaker"),
+                        "start": u.get("start"),
+                        "end": u.get("end"),
+                        "text": u.get("transcript", ""),
+                        "confidence": u.get("confidence"),
+                    }
+                    for u in body["results"].get("utterances") or []
+                ]
+            return result
         except Exception as exc:  # pragma: no cover - network path
             logger.warning("Deepgram STT failed: %s", exc)
             return {"text": "", "confidence": 0.0, "error": str(exc)}
@@ -159,14 +198,17 @@ class AssemblyAISTT:
     name: str = "assemblyai"
     available: bool = field(init=False, default=True)
 
-    def transcribe(self, audio: bytes, mime_type: str = "audio/webm") -> dict[str, Any]:
+    def transcribe(
+        self, audio: bytes, mime_type: str = "audio/webm", recording: bool = False
+    ) -> dict[str, Any]:
         import time
 
+        timeout = settings.stt_upload_timeout_seconds if recording else settings.stt_timeout_seconds
         try:
             import httpx
 
             headers = {"authorization": self.api_key}
-            with httpx.Client(timeout=settings.stt_timeout_seconds) as client:
+            with httpx.Client(timeout=timeout) as client:
                 upload = client.post(
                     "https://api.assemblyai.com/v2/upload",
                     headers={**headers, "Content-Type": "application/octet-stream"},
@@ -178,12 +220,16 @@ class AssemblyAISTT:
                 job = client.post(
                     "https://api.assemblyai.com/v2/transcript",
                     headers={**headers, "Content-Type": "application/json"},
-                    json={"audio_url": upload_url, "language_code": "en_au"},
+                    json={
+                        "audio_url": upload_url,
+                        "language_code": "en_au",
+                        **({"speaker_labels": True} if recording else {}),
+                    },
                 )
                 job.raise_for_status()
                 transcript_id = job.json()["id"]
 
-                deadline = time.monotonic() + settings.stt_timeout_seconds
+                deadline = time.monotonic() + timeout
                 while time.monotonic() < deadline:
                     poll = client.get(
                         f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
@@ -193,10 +239,23 @@ class AssemblyAISTT:
                     body = poll.json()
                     status = body.get("status")
                     if status == "completed":
-                        return {
+                        result: dict[str, Any] = {
                             "text": body.get("text") or "",
                             "confidence": body.get("confidence"),
                         }
+                        if recording:
+                            # AssemblyAI reports milliseconds.
+                            result["segments"] = [
+                                {
+                                    "speaker": u.get("speaker"),
+                                    "start": (u.get("start") or 0) / 1000,
+                                    "end": (u.get("end") or 0) / 1000,
+                                    "text": u.get("text", ""),
+                                    "confidence": u.get("confidence"),
+                                }
+                                for u in body.get("utterances") or []
+                            ]
+                        return result
                     if status == "error":
                         raise RuntimeError(body.get("error") or "AssemblyAI reported an error")
                     time.sleep(0.7)
@@ -217,7 +276,9 @@ class OpenAIWhisperSTT:
     name: str = "openai"
     available: bool = field(init=False, default=True)
 
-    def transcribe(self, audio: bytes, mime_type: str = "audio/webm") -> dict[str, Any]:
+    def transcribe(
+        self, audio: bytes, mime_type: str = "audio/webm", recording: bool = False
+    ) -> dict[str, Any]:
         try:
             import httpx
 
@@ -226,7 +287,9 @@ class OpenAIWhisperSTT:
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 files={"file": ("turn.webm", audio, mime_type)},
                 data={"model": self.model, "language": "en"},
-                timeout=settings.stt_timeout_seconds,
+                timeout=settings.stt_upload_timeout_seconds
+                if recording
+                else settings.stt_timeout_seconds,
             )
             response.raise_for_status()
             return {"text": response.json().get("text", ""), "confidence": None}
@@ -369,16 +432,24 @@ class VoiceProviderRegistry:
         }
 
     # -- speech-to-text ----------------------------------------------------- #
-    # Reached by POST /calls/{id}/audio. Without a configured provider the endpoint
+    # Reached by POST /calls/{id}/audio and POST /recordings/upload. Without a configured provider the endpoint
     # refuses up front, so this method only ever runs with somewhere to send the bytes.
 
-    def transcribe(self, audio: bytes, mime_type: str = "audio/webm") -> dict[str, Any]:
+    def transcribe(
+        self, audio: bytes, mime_type: str = "audio/webm", recording: bool = False
+    ) -> dict[str, Any]:
         name = self.active_stt
         provider = self.server_stt.get(name)
         if provider is None:
             return {"text": "", "confidence": 0.0, "error": "no_server_stt_provider"}
         try:
-            result = provider.transcribe(audio, mime_type)
+            # A live turn calls providers exactly as it always has; only an uploaded
+            # recording asks for the long timeout and speaker labels.
+            result = (
+                provider.transcribe(audio, mime_type, recording=True)
+                if recording
+                else provider.transcribe(audio, mime_type)
+            )
         except Exception as exc:  # pragma: no cover - provider path
             logger.warning("%s transcribe failed: %s", name, exc)
             result = {"text": "", "confidence": 0.0, "error": str(exc)}

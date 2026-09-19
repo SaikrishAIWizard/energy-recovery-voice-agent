@@ -112,6 +112,11 @@ class Settings:
     stt_timeout_seconds: float = field(
         default_factory=lambda: float(_env("STT_TIMEOUT_SECONDS") or 25.0)
     )
+    # Uploaded recordings are whole calls, not one-sentence turns, so they get a longer
+    # leash than `stt_timeout_seconds`.
+    stt_upload_timeout_seconds: float = field(
+        default_factory=lambda: float(_env("STT_UPLOAD_TIMEOUT_SECONDS") or 180.0)
+    )
 
     # --- Telephony (outbound dialling + warm transfer) ------------------------- #
     twilio_account_sid: str | None = field(default_factory=lambda: _env("TWILIO_ACCOUNT_SID"))
@@ -171,6 +176,7 @@ class Settings:
                 "browser_web_speech": True,
                 "simulated_turns": True,
                 "server_upload_endpoint": True,
+                "recording_upload_endpoint": True,
                 "deepgram": bool(self.deepgram_api_key),
                 "assemblyai": bool(self.assemblyai_api_key),
                 "openai_whisper": bool(self.llm_api_key),

@@ -52,7 +52,13 @@ DATA_FIELDS = [
 def _progress(session: CallSession) -> list[StepProgress]:
     order = script_service.resume_order
     rows = {row.field_name: row for row in session.journey_fields}
-    terminal = session.state in {"COMPLETED", "DECLINED", "HANDOFF_REQUESTED", "DNC_BLOCKED"}
+    terminal = session.state in {
+        "COMPLETED",
+        "DECLINED",
+        "HANDOFF_REQUESTED",
+        "DNC_BLOCKED",
+        "INCOMPLETE",
+    }
     resume_index = order.index(session.resume_step) if session.resume_step in order else 0
 
     progress: list[StepProgress] = []

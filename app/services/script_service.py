@@ -97,6 +97,22 @@ class ScriptService:
                 return candidate
         return "confirmation"
 
+    def skip_known(self, step_id: str, known_fields: set[str]) -> str:
+        """Advance past leading FIELD steps whose value is already known.
+
+        Used when an earlier uploaded recording already captured part of the journey, so
+        the recovery call only asks for what is still missing.
+        """
+        order = self.resume_order
+        if step_id not in order:
+            return step_id
+        for candidate in order[order.index(step_id):]:
+            step = self.step(candidate)
+            if step and step.get("kind") == "FIELD" and step.get("field_name") in known_fields:
+                continue
+            return candidate
+        return "confirmation"
+
     def demo_replies(self, step_id: str) -> list[str]:
         step = self.step(step_id)
         return list(step.get("demo_replies", [])) if step else []

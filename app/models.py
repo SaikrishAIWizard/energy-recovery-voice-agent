@@ -49,6 +49,13 @@ class SessionStatus(str, enum.Enum):
     DECLINED = "DECLINED"
     HANDOFF_REQUESTED = "HANDOFF_REQUESTED"
     DNC_BLOCKED = "DNC_BLOCKED"
+    # An uploaded recording was analysed and checklist items were missing. The lead stays
+    # in the recovery queue; it is not a live call and cannot be continued.
+    INCOMPLETE = "INCOMPLETE"
+
+
+# `CallSession.mode` for a session created by uploading a finished call recording.
+RECORDING_UPLOAD_MODE = "RECORDING_UPLOAD"
 
 
 class FieldStatus(str, enum.Enum):

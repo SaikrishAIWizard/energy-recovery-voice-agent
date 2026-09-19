@@ -21,7 +21,7 @@ def list_leads(db: Session = Depends(get_db)) -> list[LeadQueueItem]:
         items.append(
             LeadQueueItem(
                 lead=LeadOut.model_validate(lead),
-                resume_step=script_service.resume_step_after(lead.last_completed_step),
+                resume_step=lead_service.resume_step_for(db, lead),
                 scenario_notes=script_service.scenario_notes_for_lead(lead.id),
                 expected_outcome=script_service.expected_outcome_for_lead(lead.id),
                 latest_session_id=session.id if session else None,
@@ -47,7 +47,7 @@ def get_lead(lead_id: str, db: Session = Depends(get_db)) -> LeadDetailOut:
 
     return LeadDetailOut(
         lead=LeadOut.model_validate(lead),
-        resume_step=script_service.resume_step_after(lead.last_completed_step),
+        resume_step=lead_service.resume_step_for(db, lead),
         scenario_notes=script_service.scenario_notes_for_lead(lead.id),
         expected_outcome=script_service.expected_outcome_for_lead(lead.id),
         scripted_turns=script_service.scripted_turns_for_lead(lead.id),
