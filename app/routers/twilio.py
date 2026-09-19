@@ -115,10 +115,13 @@ def status(
 def handoff(
     call_session_id: str,
     spoken: int = 0,
+    notice: str = "",
     params: dict[str, str] = Depends(verified_form),
     db: Session = Depends(get_db),
 ) -> Response:
-    return _twiml(twilio_service.handoff_customer(db, call_session_id, params, bool(spoken)))
+    return _twiml(
+        twilio_service.handoff_customer(db, call_session_id, params, bool(spoken), notice)
+    )
 
 
 @router.post("/twilio/handoff-ended/{call_session_id}")

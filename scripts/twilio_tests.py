@@ -82,9 +82,17 @@ class FakeResponse:
         return self._body
 
 
+refuse_agent = {"on": False}
+
+
 def fake_post(url: str, **kwargs):
     data = kwargs.get("data") or {}
     rest_calls.append((url, data))
+    if url.endswith("/Calls.json") and data.get("To") == AGENT_PHONE and refuse_agent["on"]:
+        return FakeResponse(
+            400,
+            {"message": "The number +61400000999 is unverified. Trial accounts may only make calls to verified numbers."},
+        )
     if url.endswith("/Calls.json"):
         kind = "agent" if data.get("To") == AGENT_PHONE else "customer"
         _counter[kind] += 1
@@ -255,13 +263,101 @@ def main() -> int:
         r = hook(client, f"/twilio/agent-status/{quiet.id}", {"CallSid": "CAagent1", "CallStatus": "no-answer"})
         check("agent line status callback accepted", r.status_code == 204)
 
-        print("\n7. Agent never answers: the customer is told, and can be re-dialled")
-        lonely = Phone(client, "E-1006")
-        lonely.dial()
-        lonely.answer()
-        lonely.say("Can you put me through to a person?")
-        lonely.hook("handoff", query="?spoken=1")
-        check("never-joined hold ends with an apology", "HANDOFF_AGENT_JOINED" not in lonely.audit() and "couldn't reach a colleague" in lonely.hook("handoff-ended").text)
+        print("\n7. Agent busy: the customer is told to hold, and the agent is rung again")
+        def new_handoff(lead: str) -> Phone:
+            c = Phone(client, lead)
+            c.dial()
+            c.answer()
+            c.say("Can you put me through to a person?")
+            c.hook("handoff", query="?spoken=1")
+            return c
+
+        def agent_sid() -> str:
+            return f"CAagent{_counter['agent']}"
+
+        busy = new_handoff("E-1006")
+        first_sid = agent_sid()
+        check("customer waits in a hold window of the configured length", 'timeLimit="40"' in busy.hook("handoff", query="?spoken=1").text)
+        mark = len(rest_calls)
+        r = hook(client, f"/twilio/agent-status/{busy.id}", {"CallSid": first_sid, "CallStatus": "busy"})
+        check("agent-status callback accepted", r.status_code == 204)
+        moved = [d for u, d in rest_calls[mark:] if busy.sid in u]
+        check("busy line -> the customer's call is pulled out to be told", len(moved) == 1 and moved[0]["Url"] == f"{PUBLIC}/twilio/handoff/{busy.id}?spoken=1&notice=busy", str(moved))
+        check("HANDOFF_AGENT_UNAVAILABLE audited", "HANDOFF_AGENT_UNAVAILABLE" in busy.audit())
+        n = len(created_calls())
+        xml = busy.hook("handoff", query="?spoken=1&notice=busy").text
+        check("customer hears the specialist is busy and to stay on the line", "busy with another call" in xml and "stay on the line" in xml and "connect you as soon as" in xml, xml[:260])
+        check("...and stays in the conference (not hung up)", "<Conference" in xml and "<Hangup/>" not in xml)
+        check("the agent is not hammered while still busy", len(created_calls()) == n)
+        xml = busy.hook("handoff-ended").text
+        check("when the hold window ends the agent is rung again", len(created_calls()) == n + 1 and created_calls()[-1]["To"] == AGENT_PHONE)
+        check("customer keeps holding (not told to call back)", "<Conference" in xml and "couldn't reach" not in xml, xml[:200])
+        check("the busy line is said once, then a gentler update", "busy with another call" not in xml)
+        mark = len(rest_calls)
+        hook(client, f"/twilio/agent-status/{busy.id}", {"CallSid": first_sid, "CallStatus": "busy"})
+        check("a late callback from the first ring is ignored", not [1 for u, _ in rest_calls[mark:] if busy.sid in u])
+        second_sid = agent_sid()
+        hook(client, f"/twilio/agent-accept/{busy.id}", {"CallSid": second_sid, "Digits": "1"})
+        hook(client, f"/twilio/conference/{busy.id}", {"CallSid": second_sid, "StatusCallbackEvent": "participant-join"})
+        check("second ring: agent is free and joins the same call", "HANDOFF_AGENT_JOINED" in busy.audit())
+        mark = len(rest_calls)
+        hook(client, f"/twilio/agent-status/{busy.id}", {"CallSid": second_sid, "CallStatus": "completed"})
+        check("the agent hanging up afterwards does not disturb anyone", not [1 for u, _ in rest_calls[mark:] if busy.sid in u])
+
+        print("\n7b. Agent never picks up: rung up to the limit, then a callback promise")
+        giveup = new_handoff("E-1006")
+        for ring in (1, 2, 3):
+            check(f"ring {ring} placed", giveup.audit().count("HANDOFF_AGENT_DIALLED") == ring)
+            sid = agent_sid()
+            mark = len(rest_calls)
+            hook(client, f"/twilio/agent-status/{giveup.id}", {"CallSid": sid, "CallStatus": "no-answer"})
+            target = [d["Url"] for u, d in rest_calls[mark:] if giveup.sid in u]
+            if ring < 3:
+                check(f"ring {ring} unanswered -> customer told to hold", target and target[0].endswith("notice=busy"), str(target))
+                giveup.hook("handoff", query="?spoken=1&notice=busy")
+                giveup.hook("handoff-ended")
+            else:
+                check("last ring unanswered -> straight to the outcome", target and target[0].endswith(f"/twilio/handoff-ended/{giveup.id}"), str(target))
+        n = len(created_calls())
+        xml = giveup.hook("handoff-ended").text
+        check("after the last ring the customer gets the apology and a hangup", "couldn't reach a colleague" in xml and "<Hangup/>" in xml and "<Conference" not in xml, xml[:200])
+        check("no fourth ring", len(created_calls()) == n and giveup.audit().count("HANDOFF_AGENT_DIALLED") == 3)
+        check("HANDOFF_AGENT_NEVER_JOINED audited", "HANDOFF_AGENT_NEVER_JOINED" in giveup.audit())
+
+        print("\n7c. Agent still ringing at the end of a window: keep holding, within reason")
+        ringing = new_handoff("E-1006")
+        n = len(created_calls())
+        xml = ringing.hook("handoff-ended").text
+        check("still ringing -> another hold window, no second ring", "<Conference" in xml and len(created_calls()) == n)
+        for _ in range(8):
+            xml = ringing.hook("handoff-ended").text
+        check("but not forever", "couldn't reach a colleague" in xml and "<Hangup/>" in xml)
+
+        print("\n7d. Agent declines or hangs up during the briefing: same as busy")
+        decl = new_handoff("E-1006")
+        sid = agent_sid()
+        r = hook(client, f"/twilio/agent-accept/{decl.id}", {"CallSid": sid, "Digits": "2"})
+        check("agent pressing something other than 1 is not connected", "<Conference" not in r.text)
+        mark = len(rest_calls)
+        hook(client, f"/twilio/agent-status/{decl.id}", {"CallSid": sid, "CallStatus": "completed"})
+        check("customer is told to hold, not dropped", any(d["Url"].endswith("notice=busy") for u, d in rest_calls[mark:] if decl.sid in u))
+
+        print("\n7e. Twilio refuses the agent's number (unverified trial number): a clear failure, not a retry loop")
+        refuse_agent["on"] = True
+        n = len(created_calls())
+        bad = Phone(client, "E-1006")
+        bad.dial()
+        bad.answer()
+        bad.say("Can you put me through to a person?")
+        xml = bad.hook("handoff", query="?spoken=1").text
+        refuse_agent["on"] = False
+        check("customer is told a colleague could not be reached", "couldn't reach a colleague" in xml and "<Hangup/>" in xml and "<Conference" not in xml, xml[:200])
+        failed = next(e["event_detail"] for e in bad.session()["audit_events"] if e["event_type"] == "HANDOFF_AGENT_FAILED")
+        check("the audit trail says why, in Twilio's words", "unverified" in failed and "Trial accounts" in failed, failed)
+        check("it was not treated as busy", "HANDOFF_AGENT_UNAVAILABLE" not in bad.audit() and "HANDOFF_HOLD_NOTICE" not in bad.audit())
+
+        print("\n7f. The human agent can be rung again from the console")
+        lonely = new_handoff("E-1006")
         n = len(created_calls())
         r = client.post(f"/calls/{lonely.id}/handoff/dial-agent")
         check("console can ring the agent again", r.status_code == 200 and len(created_calls()) == n + 1, r.text[:120])

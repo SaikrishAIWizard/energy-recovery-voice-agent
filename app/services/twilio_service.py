@@ -57,6 +57,13 @@ HOLD_LINE = "One moment, I'm bringing in a colleague now."
 NO_AGENT_LINE = (
     "I'm sorry, I couldn't reach a colleague just now. We'll call you back shortly. Goodbye."
 )
+# Said once, when the agent's line is busy or unanswered. The customer stays on hold and
+# the agent is rung again.
+BUSY_LINE = (
+    "Our specialist is busy with another call right now. Please stay on the line and I'll "
+    "connect you as soon as they're available."
+)
+STILL_TRYING_LINE = "Thank you for holding. I'm still trying to reach our specialist."
 ENDED_LINE = "This call has ended. Goodbye."
 
 
@@ -352,6 +359,21 @@ def _hung_up(db: Session, session: CallSession, status: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _agent_events(session: CallSession) -> list[str]:
+    return [e for e in _events(session) if e.startswith("HANDOFF_AGENT_")]
+
+
+def _current_agent_sid(session: CallSession) -> str | None:
+    """The call sid of the most recent ring of the agent's phone."""
+    for event in reversed(session.audit_events):
+        if event.event_type == "HANDOFF_AGENT_DIALLED":
+            try:
+                return json.loads(event.event_detail).get("call_sid")
+            except (json.JSONDecodeError, AttributeError):
+                return None
+    return None
+
+
 def dial_agent(db: Session, session: CallSession, *, force: bool = False) -> dict[str, Any]:
     """Ring the human agent's phone. Their leg joins the customer's conference once they
     accept. Idempotent unless `force`, so a redirect that fires twice rings once."""
@@ -372,36 +394,77 @@ def dial_agent(db: Session, session: CallSession, *, force: bool = False) -> dic
             json.dumps({"call_sid": result.get("call_reference"), "to": _mask(number)}),
         )
     else:
+        # Twilio refused the call outright (unverified trial number, bad number, no funds).
+        # That is a set-up problem, not a busy agent, so it is not retried.
         _audit(db, session, "HANDOFF_AGENT_FAILED", str(result.get("error")))
     db.commit()
     return result
 
 
-def handoff_customer(db: Session, session_id: str, params: dict[str, str], spoken: bool) -> str:
-    """Move the customer into the conference and bring the human agent in. `spoken` means the
-    engine's own handoff message was already said on the last turn."""
-    session = _load(db, session_id, params)
-    if session.state != "HANDOFF_REQUESTED":
-        return _hangup(ENDED_LINE)
-
-    result = dial_agent(db, session)
-    if not result.get("placed"):
-        return _hangup(*([] if spoken else [HOLD_LINE]), NO_AGENT_LINE)
-
+def _hold_for_agent(session: CallSession, *lines: str) -> str:
+    """Speak, then wait in the conference for the agent for one hold window. When the window
+    ends `/twilio/handoff-ended` decides whether to ring again or give up."""
     return _twiml(
-        *([] if spoken else [_say(HOLD_LINE)]),
-        f'<Dial timeLimit="900" method="POST" '
+        *(_say(line) for line in lines),
+        f'<Dial timeLimit="{settings.handoff_wait_seconds}" method="POST" '
         f"action={quoteattr(settings.public_url(f'/twilio/handoff-ended/{session.id}'))}>"
         f"{_conference(session.id, agent=False)}</Dial>",
     )
 
 
-def handoff_ended(db: Session, session_id: str, params: dict[str, str]) -> str:
-    """The customer's leg left the conference. If the agent never joined, say so."""
+def handoff_customer(
+    db: Session, session_id: str, params: dict[str, str], spoken: bool, notice: str = ""
+) -> str:
+    """Move the customer into the conference and bring the human agent in. `spoken` means the
+    engine's own handoff message was already said on the last turn; `notice=busy` means the
+    agent's line was busy or unanswered and the customer is being told to hold."""
     session = _load(db, session_id, params)
-    if "HANDOFF_AGENT_JOINED" in _events(session):
+    if session.state != "HANDOFF_REQUESTED":
+        return _hangup(ENDED_LINE)
+
+    if notice == "busy":
+        first = "HANDOFF_HOLD_NOTICE" not in _events(session)
+        _audit(db, session, "HANDOFF_HOLD_NOTICE", "Customer told the agent is busy and to hold.")
+        db.commit()
+        return _hold_for_agent(session, BUSY_LINE if first else STILL_TRYING_LINE)
+
+    result = dial_agent(db, session)
+    if not result.get("placed"):
+        return _hangup(*([] if spoken else [HOLD_LINE]), NO_AGENT_LINE)
+    return _hold_for_agent(session, *([] if spoken else [HOLD_LINE]))
+
+
+def handoff_ended(db: Session, session_id: str, params: dict[str, str]) -> str:
+    """A hold window ended without the customer's leg leaving. Decide what happens next:
+    the agent is on the call (done), the agent's line was busy (ring again), the agent is
+    still ringing or being briefed (keep holding), or we have tried enough (apologise)."""
+    session = _load(db, session_id, params)
+    events = _events(session)
+    if "HANDOFF_AGENT_JOINED" in events:
         return _twiml("<Hangup/>")
-    _audit(db, session, "HANDOFF_AGENT_NEVER_JOINED", "Customer left the hold before an agent joined.")
+
+    agent = _agent_events(session)
+    last = agent[-1] if agent else None
+    attempts = events.count("HANDOFF_AGENT_DIALLED")
+    windows = events.count("HANDOFF_HOLD_WINDOW_ENDED") + 1
+    _audit(db, session, "HANDOFF_HOLD_WINDOW_ENDED", f"window={windows} rings={attempts} last={last}")
+
+    if last in ("HANDOFF_AGENT_UNAVAILABLE", "HANDOFF_AGENT_DECLINED"):
+        if attempts < settings.handoff_retry_attempts:
+            result = dial_agent(db, session, force=True)
+            if result.get("placed"):
+                first = "HANDOFF_HOLD_NOTICE" not in events
+                if first:
+                    _audit(db, session, "HANDOFF_HOLD_NOTICE", "Customer told the agent is busy.")
+                db.commit()
+                return _hold_for_agent(session, BUSY_LINE if first else STILL_TRYING_LINE)
+    elif last in ("HANDOFF_AGENT_DIALLED", "HANDOFF_AGENT_ANSWERED", "HANDOFF_AGENT_ACCEPTED"):
+        # Still ringing, or the agent is mid-briefing: keep waiting, within reason.
+        if windows <= settings.handoff_retry_attempts * 2:
+            db.commit()
+            return _hold_for_agent(session)
+
+    _audit(db, session, "HANDOFF_AGENT_NEVER_JOINED", "No agent joined before the customer's hold ran out.")
     db.commit()
     return _hangup(NO_AGENT_LINE)
 
@@ -458,13 +521,41 @@ def agent_accept(db: Session, session_id: str, params: dict[str, str]) -> str:
 
 
 def agent_status(db: Session, session_id: str, params: dict[str, str]) -> None:
+    """The agent's phone call ended. If it never joined the conference (busy, no answer,
+    hung up during the briefing, declined) the customer is told to hold and the agent is
+    rung again; if Twilio failed the call outright there is nothing to retry."""
     session = db.get(CallSession, session_id)
     if session is None:
         raise TwilioError(404, f"Unknown call session {session_id}")
     status = params.get("CallStatus", "")
-    if status in UNANSWERED:
+    events = _events(session)
+
+    # A callback from an earlier ring, or after the agent already joined, changes nothing.
+    if params.get("CallSid") != _current_agent_sid(session) or "HANDOFF_AGENT_JOINED" in events:
+        return
+    if status == "completed" and "HANDOFF_AGENT_ACCEPTED" in events:
+        return  # they pressed 1 and were connected; this is just their call ending
+    if session.state != "HANDOFF_REQUESTED":
+        return
+
+    if status == "failed":
+        _audit(db, session, "HANDOFF_AGENT_FAILED", "Twilio could not connect the agent's line.")
+        db.commit()
+        target = f"/twilio/handoff-ended/{session.id}"
+    elif status in ("busy", "no-answer", "canceled", "completed"):
+        # `completed` without joining = they hung up / pressed nothing during the briefing.
         _audit(db, session, "HANDOFF_AGENT_UNAVAILABLE", f"agent line status={status}")
         db.commit()
+        rings = events.count("HANDOFF_AGENT_DIALLED")
+        target = (
+            f"/twilio/handoff/{session.id}?spoken=1&notice=busy"
+            if rings < settings.handoff_retry_attempts
+            else f"/twilio/handoff-ended/{session.id}"
+        )
+    else:
+        return
+    # The customer is holding inside the conference: pull their call out to speak to them.
+    voice_providers.redirect_live_call(session.telephony_reference, target)
 
 
 def conference_status(db: Session, session_id: str, params: dict[str, str]) -> None:

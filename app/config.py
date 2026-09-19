@@ -148,6 +148,14 @@ class Settings:
     twilio_validate_signature: bool = field(
         default_factory=lambda: _env_default_on("TWILIO_VALIDATE_SIGNATURE")
     )
+    # When the human agent is busy or does not answer, the customer stays on hold and the
+    # agent is rung again: this many rings in total, each with this many seconds of hold.
+    handoff_retry_attempts: int = field(
+        default_factory=lambda: max(1, int(_env("HANDOFF_RETRY_ATTEMPTS") or 3))
+    )
+    handoff_wait_seconds: int = field(
+        default_factory=lambda: max(10, int(_env("HANDOFF_WAIT_SECONDS") or 40))
+    )
     # Demo/trial safety net: dial this number instead of the lead's (a Twilio trial can only
     # call numbers you have verified, and the seeded leads have synthetic numbers).
     twilio_dial_override_number: str | None = field(

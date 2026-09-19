@@ -417,6 +417,16 @@ class TwilioTelephony:
             logger.warning("Twilio agent call failed: %s", exc)
             return {"placed": False, "error": str(exc)}
 
+    def redirect(self, call_reference: str, url: str) -> dict[str, Any]:
+        """Send a live call to fetch new instructions from `url`."""
+        try:
+            self._post(f"Calls/{call_reference}.json", {"Url": url, "Method": "POST"})
+            return {"redirected": True, "provider": self.name}
+        except Exception as exc:  # pragma: no cover - network path
+            # Usually "the call is no longer in progress": the customer hung up.
+            logger.info("Twilio redirect skipped: %s", exc)
+            return {"redirected": False, "error": str(exc)}
+
     def say_and_hangup(self, call_reference: str, text: str) -> dict[str, Any]:
         """Speak one last line on a live call, then end it."""
         from xml.sax.saxutils import escape, quoteattr
@@ -607,6 +617,13 @@ class VoiceProviderRegistry:
         if provider is None:
             return {"placed": False, "error": "Twilio is not configured."}
         return provider.place_agent_call(to_number, session_id)  # type: ignore[attr-defined]
+
+    def redirect_live_call(self, call_reference: str | None, path: str) -> dict[str, Any]:
+        """Point a live phone call at one of our webhook paths (with its query string)."""
+        provider = self.telephony.get("twilio")
+        if provider is None or not call_reference or not settings.public_base_url:
+            return {"redirected": False}
+        return provider.redirect(call_reference, settings.public_url(path))  # type: ignore[attr-defined]
 
     def end_live_call(self, call_reference: str | None, text: str) -> dict[str, Any]:
         """Say goodbye and hang up a live phone call. A no-op for a browser call."""
